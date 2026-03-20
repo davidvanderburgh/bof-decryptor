@@ -23,13 +23,13 @@ pip3 install --quiet pyinstaller 2>/dev/null || true
 pyinstaller \
     --name "bof-decryptor" \
     --onedir \
-    --add-data "bof_decryptor/icon.png:bof_decryptor" \
+    --add-data "$ROOT_DIR/bof_decryptor/icon.png:bof_decryptor" \
     --noconfirm \
     --clean \
     --distpath "$SCRIPT_DIR/build/dist" \
     --workpath "$SCRIPT_DIR/build/work" \
     --specpath "$SCRIPT_DIR/build" \
-    bof_decryptor/__main__.py
+    "$ROOT_DIR/bof_decryptor/__main__.py"
 
 DIST_DIR="$SCRIPT_DIR/build/dist/bof-decryptor"
 
