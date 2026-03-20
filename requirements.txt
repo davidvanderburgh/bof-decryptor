@@ -1,0 +1,8 @@
+# BOF Asset Decryptor — Python dependencies
+#
+# The main application uses only the Python standard library (tkinter, json,
+# subprocess, threading, urllib, etc.) — no packages required to run.
+#
+# Pillow is only needed to regenerate the app icon from source:
+#   python generate_icon.py
+Pillow>=10.0

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Installer build artifacts
+installer/build/
+installer/Output/
+
+# Game files (large encrypted archives — not for version control)
+*.fun
+*.tar.gz
+*.tar
+*.pck
+
+# Extracted game assets (large — share via mod packs instead)
+/output/
+/extracted/
+
+# App settings (user-specific)
+# (stored in %APPDATA%\bof_decryptor\settings.json, not in project)
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
