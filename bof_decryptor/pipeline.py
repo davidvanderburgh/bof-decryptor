@@ -323,6 +323,7 @@ class DecryptPipeline(_BasePipeline):
             raise PipelineError("Extract", f"Copy to output failed:\n{e.output}")
 
         # Find the Godot binary
+        binary_name = ""
         try:
             binary_name = self.executor.run(
                 f"find {out_wsl!r} -name '*.x86_64' -type f | head -1",
