@@ -33,7 +33,7 @@ jobs:
       - name: Stamp version from tag
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
+          python -c "import re,pathlib;p=pathlib.Path('bof_decryptor/__init__.py');p.write_text(re.sub(r'__version__\s*=\s*\"[^\"]*\"','__version__ = \"'+'${VERSION}'+'\"',p.read_text()))"
 
       - name: Build DMG
         run: bash installer/build_macos.sh
@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
+          python -c "import re,pathlib;p=pathlib.Path('bof_decryptor/__init__.py');p.write_text(re.sub(r'__version__\s*=\s*\"[^\"]*\"','__version__ = \"'+'${VERSION}'+'\"',p.read_text()))"
 
       - name: Generate icon if missing
         shell: bash
@@ -110,7 +110,7 @@ jobs:
       - name: Stamp version from tag
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
+          python -c "import re,pathlib;p=pathlib.Path('bof_decryptor/__init__.py');p.write_text(re.sub(r'__version__\s*=\s*\"[^\"]*\"','__version__ = \"'+'${VERSION}'+'\"',p.read_text()))"
 
       - name: Build AppImage
         run: bash installer/build_linux.sh
