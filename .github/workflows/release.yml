@@ -30,6 +30,11 @@ jobs:
             python generate_icon.py
           fi
 
+      - name: Stamp version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
+
       - name: Build DMG
         run: bash installer/build_macos.sh
 
@@ -54,6 +59,12 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
 
       - name: Generate icon if missing
         shell: bash
@@ -95,6 +106,11 @@ jobs:
           if [ ! -f bof_decryptor/icon.png ]; then
             python generate_icon.py
           fi
+
+      - name: Stamp version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/__version__ = .*/__version__ = \"$VERSION\"/" bof_decryptor/__init__.py
 
       - name: Build AppImage
         run: bash installer/build_linux.sh
