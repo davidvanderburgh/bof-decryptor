@@ -174,10 +174,10 @@ def make_ico(output_path):
         append_images=images[1:],
     )
     print(f"Saved: {output_path}")
-    # Also save a preview PNG
-    preview = output_path.replace(".ico", "_preview.png")
-    images[0].save(preview)
-    print(f"Preview: {preview}")
+    # Also save PNG (used by macOS/Linux builds)
+    png_path = output_path.replace(".ico", ".png")
+    images[0].save(png_path)
+    print(f"PNG: {png_path}")
 
 
 if __name__ == "__main__":

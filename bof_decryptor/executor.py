@@ -1,12 +1,21 @@
-"""Platform-aware command execution — WSL (Windows) or native (Linux)."""
+"""Platform-aware command execution — WSL (Windows), native (Linux), or macOS."""
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
 
 # Prevent console windows from flashing when launched via pythonw.exe on Windows
 _CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+# Ensure common tool locations are on PATH (PyInstaller bundles get a minimal PATH)
+if sys.platform == "darwin":
+    _extra = ["/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"]
+    _path = os.environ.get("PATH", "")
+    _missing = [p for p in _extra if p not in _path.split(os.pathsep)]
+    if _missing:
+        os.environ["PATH"] = os.pathsep.join([_path] + _missing)
 
 
 def _decode_output(data):
@@ -227,8 +236,64 @@ class NativeExecutor(CommandExecutor):
         return True, "Native Linux"
 
 
+class MacExecutor(CommandExecutor):
+    """Execute commands natively on macOS (no sudo needed for file operations)."""
+
+    def run(self, bash_cmd, timeout=120):
+        full_cmd = ["bash", "-c", bash_cmd]
+        try:
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s") from e
+        if result.returncode != 0:
+            output = (result.stderr or "") + (result.stdout or "")
+            raise CommandError(bash_cmd, result.returncode, output.strip())
+        return result.stdout
+
+    def stream(self, bash_cmd, timeout=600):
+        full_cmd = ["bash", "-c", bash_cmd]
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        with self._lock:
+            self._current_proc = proc
+        try:
+            for line in proc.stdout:
+                yield line.rstrip("\n\r")
+            proc.wait(timeout=timeout)
+            if proc.returncode != 0:
+                raise CommandError(bash_cmd, proc.returncode, "")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s")
+        finally:
+            with self._lock:
+                self._current_proc = None
+
+    def to_exec_path(self, host_path):
+        return host_path
+
+    def check_available(self):
+        return True, "macOS native"
+
+
 def create_executor():
     """Return the appropriate executor for the current platform."""
     if sys.platform == "win32":
         return WslExecutor()
+    elif sys.platform == "darwin":
+        return MacExecutor()
     return NativeExecutor()

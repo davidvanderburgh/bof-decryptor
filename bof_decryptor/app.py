@@ -159,32 +159,50 @@ class App:
         threading.Thread(target=_run, daemon=True).start()
 
     def _install_prereqs(self):
-        self.window.append_log("Installing prerequisites in WSL...", "info")
+        import sys as _sys
+        platform = _sys.platform
+
+        if platform == "win32":
+            self.window.append_log("Installing prerequisites in WSL...", "info")
+        elif platform == "darwin":
+            self.window.append_log("Installing prerequisites via Homebrew...", "info")
+        else:
+            self.window.append_log("Installing prerequisites...", "info")
+
         self.window.install_btn.configure(state=tk.DISABLED)
 
         def _run():
             try:
                 self.executor.run("echo ok", timeout=15)
             except Exception:
-                self.msg_queue.put(LogMsg(
-                    "WSL2 is not available. Install Ubuntu from the Microsoft Store "
-                    "or run: wsl --install -d Ubuntu", "error"))
+                if platform == "win32":
+                    msg = ("WSL2 is not available. Install Ubuntu from the "
+                           "Microsoft Store or run: wsl --install -d Ubuntu")
+                else:
+                    msg = "Command execution failed. Check system configuration."
+                self.msg_queue.put(LogMsg(msg, "error"))
                 self.root.after(0, lambda: self.window.install_btn.configure(
                     state=tk.NORMAL))
                 return
 
-            # gpg + tar
+            # Install base packages
+            if platform == "win32":
+                pkg_cmd = ("apt-get update -qq && "
+                           "apt-get install -y gnupg tar curl unzip xvfb 2>&1")
+            elif platform == "darwin":
+                pkg_cmd = "brew install gnupg curl unzip 2>&1"
+            else:
+                pkg_cmd = ("sudo apt-get update -qq && "
+                           "sudo apt-get install -y gnupg tar curl unzip xvfb 2>&1")
+
             try:
-                for line in self.executor.stream(
-                    "apt-get update -qq && apt-get install -y gnupg tar curl unzip xvfb 2>&1",
-                    timeout=300,
-                ):
+                for line in self.executor.stream(pkg_cmd, timeout=300):
                     self.msg_queue.put(LogMsg(f"  {line}", "info"))
                 self.msg_queue.put(LogMsg("Base packages installed.", "success"))
             except Exception as e:
-                self.msg_queue.put(LogMsg(f"apt-get failed: {e}", "error"))
+                self.msg_queue.put(LogMsg(f"Package install failed: {e}", "error"))
 
-            # GDRE Tools — download latest Linux release from GitHub
+            # GDRE Tools
             self._install_gdre_tools()
 
             results = check_prerequisites(self.executor)
@@ -197,15 +215,32 @@ class App:
                 self.msg_queue.put(LogMsg(
                     "Some prerequisites are still missing.", "error"))
 
+            self.root.after(0, lambda: self.window.install_btn.configure(
+                state=tk.NORMAL))
+
         threading.Thread(target=_run, daemon=True).start()
 
     def _install_gdre_tools(self):
-        """Download and install the latest GDRE Tools Linux binary into WSL."""
+        """Download and install the latest GDRE Tools binary."""
         import base64 as _b64
+        import sys as _sys
+
+        platform = _sys.platform
+
+        # Determine which release asset suffix to look for
+        if platform == "darwin":
+            asset_suffix = "-macos.zip"
+            binary_name = "gdre_tools"
+            lib_name = "libGodotMonoDecompNativeAOT.dylib"
+        else:
+            asset_suffix = "-linux.zip"
+            binary_name = "gdre_tools.x86_64"
+            lib_name = "libGodotMonoDecompNativeAOT.so"
+
         _wrapper = (
             "#!/bin/bash\n"
             "export LD_LIBRARY_PATH=/opt/gdre_tools:$LD_LIBRARY_PATH\n"
-            'exec /opt/gdre_tools/gdre_tools.x86_64 "$@"\n'
+            f'exec /opt/gdre_tools/{binary_name} "$@"\n'
         )
         _wrapper_b64 = _b64.b64encode(_wrapper.encode()).decode()
 
@@ -218,18 +253,19 @@ class App:
             )
             import json as _json
             data = _json.loads(url_json)
-            linux_url = None
+            dl_url = None
             zip_name = None
             for asset in data.get("assets", []):
                 name = asset.get("name", "")
-                if name.endswith("-linux.zip"):
-                    linux_url = asset["browser_download_url"]
+                if name.endswith(asset_suffix):
+                    dl_url = asset["browser_download_url"]
                     zip_name = name
                     break
 
-            if not linux_url:
+            if not dl_url:
                 self.msg_queue.put(LogMsg(
-                    "Could not find GDRE Tools Linux release asset.", "error"))
+                    f"Could not find GDRE Tools {asset_suffix} release asset.",
+                    "error"))
                 return
 
             version = data.get("tag_name", "")
@@ -238,7 +274,7 @@ class App:
 
             # Download
             for line in self.executor.stream(
-                f"curl -L --progress-bar {linux_url!r} -o /tmp/gdre_tools.zip 2>&1",
+                f"curl -L --progress-bar {dl_url!r} -o /tmp/gdre_tools.zip 2>&1",
                 timeout=300,
             ):
                 if line.strip():
@@ -246,21 +282,28 @@ class App:
 
             self.msg_queue.put(LogMsg("Extracting...", "info"))
 
-            # Extract all files and install to /opt/gdre_tools/
-            # (binary needs .pck and .so alongside it)
+            # Use sudo for /opt on Linux, not on macOS (use mkdir -p with
+            # current user on macOS, or sudo if needed)
+            if platform == "darwin":
+                sudo = "sudo "
+            elif platform == "win32":
+                sudo = ""  # WSL runs as root
+            else:
+                sudo = "sudo "
+
+            # Extract and install to /opt/gdre_tools/
             self.executor.run(
                 "rm -rf /tmp/gdre_extract && "
                 "mkdir -p /tmp/gdre_extract && "
                 "unzip -o /tmp/gdre_tools.zip -d /tmp/gdre_extract/ && "
-                "rm -rf /opt/gdre_tools && "
-                "mkdir -p /opt/gdre_tools && "
-                "cp -f /tmp/gdre_extract/gdre_tools.x86_64 /opt/gdre_tools/ && "
-                "cp -f /tmp/gdre_extract/gdre_tools.pck /opt/gdre_tools/ && "
-                "cp -f /tmp/gdre_extract/libGodotMonoDecompNativeAOT.so /opt/gdre_tools/ && "
-                "chmod +x /opt/gdre_tools/gdre_tools.x86_64 && "
-                # Wrapper script — use base64 to avoid all shell quoting issues
-                + f"echo {_wrapper_b64!r} | base64 -d > /usr/local/bin/gdre_tools && "
-                "chmod +x /usr/local/bin/gdre_tools && "
+                f"{sudo}rm -rf /opt/gdre_tools && "
+                f"{sudo}mkdir -p /opt/gdre_tools && "
+                f"{sudo}cp -f /tmp/gdre_extract/{binary_name} /opt/gdre_tools/ && "
+                f"{sudo}cp -f /tmp/gdre_extract/gdre_tools.pck /opt/gdre_tools/ && "
+                f"({sudo}cp -f /tmp/gdre_extract/{lib_name} /opt/gdre_tools/ 2>/dev/null || true) && "
+                f"{sudo}chmod +x /opt/gdre_tools/{binary_name} && "
+                f"echo {_wrapper_b64!r} | base64 -d | {sudo}tee /usr/local/bin/gdre_tools > /dev/null && "
+                f"{sudo}chmod +x /usr/local/bin/gdre_tools && "
                 "rm -rf /tmp/gdre_tools.zip /tmp/gdre_extract",
                 timeout=120,
             )

@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -56,11 +57,16 @@ def check_prerequisites(executor):
     """
     results = []
 
-    # Executor availability (WSL2 on Windows)
+    # Executor availability
     ok, msg = executor.check_available()
-    results.append(("WSL2" if hasattr(executor, "to_exec_path") and
-                    "wsl" in type(executor).__name__.lower() else "System",
-                    ok, msg))
+    executor_name = type(executor).__name__
+    if "Wsl" in executor_name:
+        label = "WSL2"
+    elif "Mac" in executor_name:
+        label = "macOS"
+    else:
+        label = "System"
+    results.append((label, ok, msg))
 
     if not ok:
         return results
@@ -206,6 +212,22 @@ class DecryptPipeline(_BasePipeline):
         self.unpack_pck = unpack_pck
         self._tmp_dir = None
 
+    def _gdre_prefix(self):
+        """Return the shell prefix to invoke GDRE Tools headlessly."""
+        if sys.platform == "darwin":
+            # macOS: GDRE binary installed to /usr/local/bin or /opt/gdre_tools
+            return (
+                "GODOT_SILENCE_ROOT_WARNING=1 "
+                "/opt/gdre_tools/gdre_tools --headless "
+            )
+        # Linux / WSL: needs xvfb for headless display
+        return (
+            "DISPLAY= WAYLAND_DISPLAY= "
+            "GODOT_SILENCE_ROOT_WARNING=1 "
+            "LD_LIBRARY_PATH=/opt/gdre_tools "
+            "xvfb-run -a /opt/gdre_tools/gdre_tools.x86_64 --headless "
+        )
+
     def run(self):
         try:
             self._run()
@@ -319,12 +341,7 @@ class DecryptPipeline(_BasePipeline):
             try:
                 pck_out = f"{out_wsl}/pck"
                 binary_wsl = binary_name if binary_name else f"{out_wsl}/GDCraze.x86_64"
-                gdre_prefix = (
-                    "DISPLAY= WAYLAND_DISPLAY= "
-                    "GODOT_SILENCE_ROOT_WARNING=1 "
-                    "LD_LIBRARY_PATH=/opt/gdre_tools "
-                    "xvfb-run -a /opt/gdre_tools/gdre_tools.x86_64 --headless "
-                )
+                gdre_prefix = self._gdre_prefix()
 
                 # GDRE outputs phase progress as "Phase name... [===] XX%" separated
                 # by \r (not \n), so we split each streamed line on \r and parse.
