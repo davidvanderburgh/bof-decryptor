@@ -239,6 +239,17 @@ class NativeExecutor(CommandExecutor):
 class MacExecutor(CommandExecutor):
     """Execute commands natively on macOS (no sudo needed for file operations)."""
 
+    # Homebrew (Apple Silicon + Intel) and MacPorts paths — ensures tools like
+    # gpg are found even when the login shell is zsh and bash -l doesn't pick
+    # up the user's PATH additions.
+    _EXTRA_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
+
+    def _env(self):
+        import os as _os
+        env = _os.environ.copy()
+        env["PATH"] = f"{self._EXTRA_PATH}:{env.get('PATH', '/usr/bin:/bin')}"
+        return env
+
     def run(self, bash_cmd, timeout=120):
         full_cmd = ["bash", "-l", "-c", bash_cmd]
         try:
@@ -249,6 +260,7 @@ class MacExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=self._env(),
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s") from e
@@ -267,6 +279,7 @@ class MacExecutor(CommandExecutor):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=self._env(),
         )
         with self._lock:
             self._current_proc = proc
