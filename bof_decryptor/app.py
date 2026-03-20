@@ -230,17 +230,21 @@ class App:
         # Determine which release asset suffix to look for
         if platform == "darwin":
             asset_suffix = "-macos.zip"
-            binary_name = "gdre_tools"
+            binary_name = "Godot RE Tools"
             lib_name = "libGodotMonoDecompNativeAOT.dylib"
+            install_dir = os.path.expanduser("~/.local/share/gdre_tools")
+            wrapper_dir = os.path.expanduser("~/.local/bin")
         else:
             asset_suffix = "-linux.zip"
             binary_name = "gdre_tools.x86_64"
             lib_name = "libGodotMonoDecompNativeAOT.so"
+            install_dir = "/opt/gdre_tools"
+            wrapper_dir = "/usr/local/bin"
 
         _wrapper = (
             "#!/bin/bash\n"
-            "export LD_LIBRARY_PATH=/opt/gdre_tools:$LD_LIBRARY_PATH\n"
-            f'exec /opt/gdre_tools/{binary_name} "$@"\n'
+            f"export LD_LIBRARY_PATH={install_dir}:$LD_LIBRARY_PATH\n"
+            f'exec "{install_dir}/{binary_name}" "$@"\n'
         )
         _wrapper_b64 = _b64.b64encode(_wrapper.encode()).decode()
 
@@ -282,33 +286,46 @@ class App:
 
             self.msg_queue.put(LogMsg("Extracting...", "info"))
 
-            # Use sudo for /opt on Linux, not on macOS (use mkdir -p with
-            # current user on macOS, or sudo if needed)
+            # macOS: .app bundle, no sudo needed (user-local install)
+            # Linux: flat files, sudo needed for /opt
             if platform == "darwin":
-                sudo = "sudo "
-            elif platform == "win32":
-                sudo = ""  # WSL runs as root
+                sudo = ""
+                app_contents = "/tmp/gdre_extract/Godot RE Tools.app/Contents"
+                extract_cmd = (
+                    "rm -rf /tmp/gdre_extract && "
+                    "mkdir -p /tmp/gdre_extract && "
+                    "unzip -o /tmp/gdre_tools.zip -d /tmp/gdre_extract/ && "
+                    f"rm -rf '{install_dir}' && "
+                    f"mkdir -p '{install_dir}' && "
+                    f"cp -f '{app_contents}/MacOS/{binary_name}' '{install_dir}/' && "
+                    f"cp -f '{app_contents}/Resources/{binary_name}.pck' '{install_dir}/' && "
+                    f"(cp -f '{app_contents}/Frameworks/{lib_name}' '{install_dir}/' 2>/dev/null || true) && "
+                    f"chmod +x '{install_dir}/{binary_name}' && "
+                    f"mkdir -p '{wrapper_dir}' && "
+                    f"echo {_wrapper_b64!r} | base64 -d > '{wrapper_dir}/gdre_tools' && "
+                    f"chmod +x '{wrapper_dir}/gdre_tools' && "
+                    "rm -rf /tmp/gdre_tools.zip /tmp/gdre_extract"
+                )
             else:
                 sudo = "sudo "
+                extract_cmd = (
+                    "rm -rf /tmp/gdre_extract && "
+                    "mkdir -p /tmp/gdre_extract && "
+                    "unzip -o /tmp/gdre_tools.zip -d /tmp/gdre_extract/ && "
+                    f"{sudo}rm -rf {install_dir} && "
+                    f"{sudo}mkdir -p {install_dir} && "
+                    f"{sudo}cp -f /tmp/gdre_extract/{binary_name} {install_dir}/ && "
+                    f"{sudo}cp -f /tmp/gdre_extract/gdre_tools.pck {install_dir}/ && "
+                    f"({sudo}cp -f /tmp/gdre_extract/{lib_name} {install_dir}/ 2>/dev/null || true) && "
+                    f"{sudo}chmod +x {install_dir}/{binary_name} && "
+                    f"echo {_wrapper_b64!r} | base64 -d | {sudo}tee {wrapper_dir}/gdre_tools > /dev/null && "
+                    f"{sudo}chmod +x {wrapper_dir}/gdre_tools && "
+                    "rm -rf /tmp/gdre_tools.zip /tmp/gdre_extract"
+                )
 
-            # Extract and install to /opt/gdre_tools/
-            self.executor.run(
-                "rm -rf /tmp/gdre_extract && "
-                "mkdir -p /tmp/gdre_extract && "
-                "unzip -o /tmp/gdre_tools.zip -d /tmp/gdre_extract/ && "
-                f"{sudo}rm -rf /opt/gdre_tools && "
-                f"{sudo}mkdir -p /opt/gdre_tools && "
-                f"{sudo}cp -f /tmp/gdre_extract/{binary_name} /opt/gdre_tools/ && "
-                f"{sudo}cp -f /tmp/gdre_extract/gdre_tools.pck /opt/gdre_tools/ && "
-                f"({sudo}cp -f /tmp/gdre_extract/{lib_name} /opt/gdre_tools/ 2>/dev/null || true) && "
-                f"{sudo}chmod +x /opt/gdre_tools/{binary_name} && "
-                f"echo {_wrapper_b64!r} | base64 -d | {sudo}tee /usr/local/bin/gdre_tools > /dev/null && "
-                f"{sudo}chmod +x /usr/local/bin/gdre_tools && "
-                "rm -rf /tmp/gdre_tools.zip /tmp/gdre_extract",
-                timeout=120,
-            )
+            self.executor.run(extract_cmd, timeout=120)
             self.msg_queue.put(LogMsg(
-                f"GDRE Tools {version} installed to /usr/local/bin/gdre_tools.",
+                f"GDRE Tools {version} installed to {wrapper_dir}/gdre_tools.",
                 "success"))
         except Exception as e:
             self.msg_queue.put(LogMsg(

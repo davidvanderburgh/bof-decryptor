@@ -87,8 +87,12 @@ def check_prerequisites(executor):
 
     # gdre_tools (optional — for Godot PCK extraction)
     try:
+        local_bin = os.path.expanduser("~/.local/bin/gdre_tools")
         path = executor.run(
-            "which gdre_tools 2>/dev/null || echo MISSING", timeout=10
+            f"which gdre_tools 2>/dev/null || "
+            f"(test -x '{local_bin}' && echo '{local_bin}') || "
+            f"echo MISSING",
+            timeout=10,
         ).strip()
         if "MISSING" in path or not path:
             results.append(("gdre_tools", False,
@@ -215,10 +219,10 @@ class DecryptPipeline(_BasePipeline):
     def _gdre_prefix(self):
         """Return the shell prefix to invoke GDRE Tools headlessly."""
         if sys.platform == "darwin":
-            # macOS: GDRE binary installed to /usr/local/bin or /opt/gdre_tools
+            install_dir = os.path.expanduser("~/.local/share/gdre_tools")
             return (
                 "GODOT_SILENCE_ROOT_WARNING=1 "
-                "/opt/gdre_tools/gdre_tools --headless "
+                f"'{install_dir}/Godot RE Tools' --headless "
             )
         # Linux / WSL: needs xvfb for headless display
         return (
