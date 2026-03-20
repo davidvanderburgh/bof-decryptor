@@ -240,7 +240,7 @@ class MacExecutor(CommandExecutor):
     """Execute commands natively on macOS (no sudo needed for file operations)."""
 
     def run(self, bash_cmd, timeout=120):
-        full_cmd = ["bash", "-c", bash_cmd]
+        full_cmd = ["bash", "-l", "-c", bash_cmd]
         try:
             result = subprocess.run(
                 full_cmd,
@@ -258,7 +258,7 @@ class MacExecutor(CommandExecutor):
         return result.stdout
 
     def stream(self, bash_cmd, timeout=600):
-        full_cmd = ["bash", "-c", bash_cmd]
+        full_cmd = ["bash", "-l", "-c", bash_cmd]
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
