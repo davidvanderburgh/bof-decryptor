@@ -392,24 +392,12 @@ class App:
 
     def _start_modify(self):
         assets_dir = self.window.write_input_var.get().strip()
-        output_fun = self.window.write_output_var.get().strip()
+        output_dir = self.window.write_output_var.get().strip()
         game_display = self.window.write_game_var.get().strip()
 
-        if not assets_dir:
-            messagebox.showwarning("Missing Input",
-                "Please select an assets folder.")
-            return
-        if not os.path.isdir(assets_dir):
-            messagebox.showerror("Invalid Folder",
-                f"Folder not found:\n{assets_dir}")
-            return
-        if not output_fun:
-            messagebox.showwarning("Missing Input",
-                "Please specify an output .fun file path.")
-            return
         if not game_display:
             messagebox.showwarning("Missing Input",
-                "Please select a game.")
+                "Please select a game first.")
             return
 
         # Parse game key from combobox text "Display Name (key)"
@@ -421,6 +409,23 @@ class App:
         if game_key is None:
             messagebox.showerror("Unknown Game", "Could not identify the selected game.")
             return
+
+        if not assets_dir:
+            messagebox.showwarning("Missing Input",
+                "Please select an assets folder.")
+            return
+        if not os.path.isdir(assets_dir):
+            messagebox.showerror("Invalid Folder",
+                f"Folder not found:\n{assets_dir}")
+            return
+        if not output_dir:
+            messagebox.showwarning("Missing Input",
+                "Please select an output folder.")
+            return
+
+        # Build output path from folder + game's .fun filename
+        fun_file = GAME_DB[game_key]["fun_file"]
+        output_fun = os.path.join(output_dir, fun_file)
 
         self._save_settings()
 

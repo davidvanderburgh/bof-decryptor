@@ -128,6 +128,9 @@ class MainWindow:
         # sync modify_input_var with write_input_var
         self.write_input_var.trace_add("write",
             lambda *_: self.modify_input_var.set(self.write_input_var.get()))
+        # update filename label when output folder changes
+        self.write_output_var.trace_add("write",
+            lambda *_: self._update_write_filename())
 
     @staticmethod
     def _detect_system_theme():
@@ -304,6 +307,17 @@ class MainWindow:
         ttk.Label(f, text="Re-pack modified assets into a .fun file for USB install.",
                   font=(_SANS_FONT, 9, "italic")).pack(anchor=tk.W, **pad)
 
+        # Game selection (first — drives the output filename)
+        row_game = ttk.Frame(f)
+        row_game.pack(fill=tk.X, **pad)
+        ttk.Label(row_game, text="Game:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        game_options = [f"{info} ({key})" for key, info in KNOWN_GAMES.items()]
+        self._write_game_cb = ttk.Combobox(
+            row_game, textvariable=self.write_game_var,
+            values=game_options, state="readonly", width=40)
+        self._write_game_cb.pack(side=tk.LEFT)
+        self._write_game_cb.bind("<<ComboboxSelected>>", self._on_game_selected)
+
         # Assets folder
         row = ttk.Frame(f)
         row.pack(fill=tk.X, **pad)
@@ -312,29 +326,21 @@ class MainWindow:
             side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row, text="Browse...",
                    command=self._browse_write_input).pack(side=tk.LEFT, padx=(4, 0))
-        _Tooltip(row, "The folder produced by Decrypt — contains GDCraze.x86_64 "
-                 "and .checksums.md5.", lambda: self._current_theme)
 
-        # Output .fun file
+        # Output folder
         row2 = ttk.Frame(f)
         row2.pack(fill=tk.X, **pad)
-        ttk.Label(row2, text="Output .fun File:", width=16, anchor=tk.W).pack(
+        ttk.Label(row2, text="Output Folder:", width=16, anchor=tk.W).pack(
             side=tk.LEFT)
         ttk.Entry(row2, textvariable=self.write_output_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row2, text="Browse...",
                    command=self._browse_write_output).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Game selection
-        row3 = ttk.Frame(f)
-        row3.pack(fill=tk.X, **pad)
-        ttk.Label(row3, text="Game:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        game_options = [f"{info} ({key})" for key, info in KNOWN_GAMES.items()]
-        self._write_game_cb = ttk.Combobox(
-            row3, textvariable=self.write_game_var,
-            values=game_options, state="readonly", width=40)
-        self._write_game_cb.pack(side=tk.LEFT)
-        self._write_game_cb.bind("<<ComboboxSelected>>", self._on_game_selected)
+        # Generated filename display
+        self._write_filename_lbl = ttk.Label(f, text="",
+                                             font=(_SANS_FONT, 9, "italic"))
+        self._write_filename_lbl.pack(anchor=tk.W, padx=26)
 
         # Warning
         self._write_warn = ttk.Label(f, text="", foreground="#f44747",
@@ -449,38 +455,31 @@ class MainWindow:
             self.write_input_var.set(path)
 
     def _browse_write_output(self):
-        # Default to the correct .fun filename for the selected game
-        initial = ""
-        game_display = self.write_game_var.get()
-        for key, display in KNOWN_GAMES.items():
-            if f"({key})" in game_display:
-                initial = GAME_DB[key]["fun_file"]
-                break
-        path = filedialog.asksaveasfilename(
-            title="Save .fun file as",
-            defaultextension=".fun",
-            initialfile=initial,
-            filetypes=[("BOF update files", "*.fun"), ("All files", "*.*")],
-        )
+        path = filedialog.askdirectory(title="Select output folder for .fun file")
         if path:
             self.write_output_var.set(path)
+            self._update_write_filename()
 
     def _on_game_selected(self, event=None):
-        """Auto-set the output .fun filename when a game is selected."""
+        """Update the generated filename label when a game is selected."""
+        self._update_write_filename()
+
+    def _update_write_filename(self):
+        """Show the generated .fun filename based on game + output folder."""
         game_display = self.write_game_var.get()
+        out_dir = self.write_output_var.get().strip()
+        fun_file = ""
         for key, display in KNOWN_GAMES.items():
             if f"({key})" in game_display:
                 fun_file = GAME_DB[key]["fun_file"]
-                # If output is empty or already a .fun file, update it
-                current = self.write_output_var.get().strip()
-                if not current or current.endswith(".fun"):
-                    # Preserve the directory, just change the filename
-                    if current:
-                        dirname = os.path.dirname(current)
-                        self.write_output_var.set(os.path.join(dirname, fun_file))
-                    else:
-                        self.write_output_var.set(fun_file)
                 break
+        if fun_file and out_dir:
+            full = os.path.join(out_dir, fun_file)
+            self._write_filename_lbl.configure(text=f"Output: {full}")
+        elif fun_file:
+            self._write_filename_lbl.configure(text=f"Filename: {fun_file}")
+        else:
+            self._write_filename_lbl.configure(text="")
 
     # ------------------------------------------------------------------
     # Dynamic UI state
