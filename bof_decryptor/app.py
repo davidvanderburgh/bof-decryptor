@@ -190,6 +190,23 @@ class App:
                 pkg_cmd = ("apt-get update -qq && "
                            "apt-get install -y gnupg tar curl unzip xvfb 2>&1")
             elif platform == "darwin":
+                # Check if Homebrew is installed; if not, install it first
+                try:
+                    self.executor.run("command -v brew > /dev/null 2>&1", timeout=10)
+                except Exception:
+                    self.msg_queue.put(LogMsg("Homebrew not found — installing...", "info"))
+                    try:
+                        for line in self.executor.stream(
+                            'NONINTERACTIVE=1 /bin/bash -c '
+                            '"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>&1',
+                            timeout=600,
+                        ):
+                            self.msg_queue.put(LogMsg(f"  {line}", "info"))
+                        self.msg_queue.put(LogMsg("Homebrew installed.", "success"))
+                    except Exception as e:
+                        self.msg_queue.put(LogMsg(f"Homebrew install failed: {e}", "error"))
+                        self.msg_queue.put(LogMsg(
+                            "Install Homebrew manually: https://brew.sh", "error"))
                 pkg_cmd = "brew install gnupg curl unzip 2>&1"
             else:
                 pkg_cmd = ("sudo apt-get update -qq && "

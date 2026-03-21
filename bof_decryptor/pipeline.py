@@ -166,7 +166,7 @@ def check_prerequisites(executor):
         results.append(("gpg", True, gpg_path))
     else:
         try:
-            executor.run("gpg --version 2>&1 | head -1", timeout=10)
+            executor.run("gpg --version > /dev/null 2>&1", timeout=10)
             gpg_path = executor.run(
                 "command -v gpg 2>/dev/null || which gpg 2>/dev/null || echo gpg",
                 timeout=10,
@@ -181,7 +181,7 @@ def check_prerequisites(executor):
 
     # tar
     try:
-        executor.run("tar --version 2>&1 | head -1", timeout=10)
+        executor.run("tar --version > /dev/null 2>&1", timeout=10)
         results.append(("tar", True, "available"))
     except Exception:
         results.append(("tar", False, "Not found — install with: apt-get install tar"))
