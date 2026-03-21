@@ -244,14 +244,12 @@ class MacExecutor(CommandExecutor):
     # up the user's PATH additions.
     _EXTRA_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
 
-    def _env(self):
-        import os as _os
-        env = _os.environ.copy()
-        env["PATH"] = f"{self._EXTRA_PATH}:{env.get('PATH', '/usr/bin:/bin')}"
-        return env
+    def _wrap(self, bash_cmd):
+        """Prepend Homebrew/MacPorts paths to PATH inside the shell command."""
+        return f'export PATH="{self._EXTRA_PATH}:$PATH"; {bash_cmd}'
 
     def run(self, bash_cmd, timeout=120):
-        full_cmd = ["bash", "-l", "-c", bash_cmd]
+        full_cmd = ["bash", "-l", "-c", self._wrap(bash_cmd)]
         try:
             result = subprocess.run(
                 full_cmd,
@@ -260,7 +258,6 @@ class MacExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
-                env=self._env(),
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s") from e
@@ -270,7 +267,7 @@ class MacExecutor(CommandExecutor):
         return result.stdout
 
     def stream(self, bash_cmd, timeout=600):
-        full_cmd = ["bash", "-l", "-c", bash_cmd]
+        full_cmd = ["bash", "-l", "-c", self._wrap(bash_cmd)]
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
@@ -279,7 +276,6 @@ class MacExecutor(CommandExecutor):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=self._env(),
         )
         with self._lock:
             self._current_proc = proc
