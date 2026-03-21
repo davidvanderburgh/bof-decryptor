@@ -744,6 +744,18 @@ class ModifyPipeline(_BasePipeline):
                 raise PipelineError("Patch",
                     f"Failed to replace binary:\n{e.output}")
 
+            # Update the md5 checksum file to match the patched binary
+            binary_basename = os.path.basename(binary_wsl)
+            try:
+                self.executor.run(
+                    f"cd {tmp_dir_wsl!r} && "
+                    f"md5sum {binary_basename!r} > md5",
+                    timeout=120,
+                )
+                self._log("Updated md5 checksum.", "info")
+            except CommandError:
+                self._log("Warning: could not update md5 file.", "error")
+
             self._log("Binary patched.", "success")
         else:
             self._log("No modified PCK files — using original binary.", "info")
