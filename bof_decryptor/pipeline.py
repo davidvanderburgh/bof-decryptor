@@ -85,6 +85,19 @@ class _BasePipeline:
 
         return _Ctx()
 
+    def _resolve_gpg(self):
+        """Return full path to gpg, ensuring it's found even in macOS .app bundles."""
+        try:
+            path = self.executor.run(
+                "command -v gpg 2>/dev/null || which gpg 2>/dev/null",
+                timeout=10,
+            ).strip()
+            if path:
+                return path
+        except Exception:
+            pass
+        return "gpg"  # fallback — let the shell try
+
     def _gdre_prefix(self):
         """Return the shell prefix to invoke GDRE Tools headlessly."""
         if sys.platform == "darwin":
@@ -301,6 +314,7 @@ class DecryptPipeline(_BasePipeline):
         passphrase = game_info["passphrase"]
         fun_wsl = self.executor.to_exec_path(self.fun_path)
         out_wsl = self.executor.to_exec_path(self.output_dir)
+        gpg_bin = self._resolve_gpg()
 
         # Phase 1 — Decrypt
         self._set_phase(1)
@@ -312,7 +326,7 @@ class DecryptPipeline(_BasePipeline):
         try:
             with self._poll_file_progress(tmp_tar_wsl, fun_size, "Decrypting..."):
                 self.executor.run(
-                    f"gpg --batch --yes --passphrase={passphrase!r} "
+                    f"{gpg_bin} --batch --yes --passphrase={passphrase!r} "
                     f"--decrypt --output {tmp_tar_wsl!r} {fun_wsl!r} 2>&1",
                     timeout=GPG_DECRYPT_TIMEOUT,
                 )
@@ -544,6 +558,7 @@ class ModifyPipeline(_BasePipeline):
         out_fun_wsl = self.executor.to_exec_path(self.output_fun_path)
         passphrase = game_info["passphrase"]
         game_key = self.game_key
+        gpg_bin = self._resolve_gpg()
 
         # Phase 0 — Scan: find the binary and detect changed PCK files
         self._set_phase(0)
@@ -659,7 +674,7 @@ class ModifyPipeline(_BasePipeline):
                 self.executor.run(
                     f"mv -f {tmp_binary_wsl!r} {binary_wsl!r} && "
                     f"chmod +x {binary_wsl!r}",
-                    timeout=120,
+                    timeout=600,
                 )
             except CommandError as e:
                 raise PipelineError("Repack",
@@ -733,7 +748,7 @@ class ModifyPipeline(_BasePipeline):
                 out_fun_wsl, tar_bytes, "Encrypting..."
             ) if tar_bytes else _nullctx():
                 self.executor.run(
-                    f"gpg --batch --yes --passphrase={passphrase!r} "
+                    f"{gpg_bin} --batch --yes --passphrase={passphrase!r} "
                     f"--symmetric --cipher-algo AES256 "
                     f"--output {out_fun_wsl!r} {tmp_tar_wsl!r} 2>&1",
                     timeout=GPG_ENCRYPT_TIMEOUT,

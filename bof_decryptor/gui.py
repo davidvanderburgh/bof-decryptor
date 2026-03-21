@@ -474,7 +474,11 @@ class MainWindow:
                 fun_file = GAME_DB[key]["fun_file"]
                 break
         if fun_file and out_dir:
-            full = os.path.join(out_dir, fun_file)
+            # Don't double-append if user already included the .fun filename
+            if os.path.basename(out_dir).lower() == fun_file.lower():
+                full = out_dir
+            else:
+                full = os.path.join(out_dir, fun_file)
             self._write_filename_lbl.configure(text=f"Output: {full}")
         elif fun_file:
             self._write_filename_lbl.configure(text=f"Filename: {fun_file}")

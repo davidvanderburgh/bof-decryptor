@@ -242,14 +242,15 @@ class MacExecutor(CommandExecutor):
     # Homebrew (Apple Silicon + Intel) and MacPorts paths — ensures tools like
     # gpg are found even when the login shell is zsh and bash -l doesn't pick
     # up the user's PATH additions.
-    _EXTRA_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
+    _EXTRA_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/local/MacGPG2/bin"
 
     def _wrap(self, bash_cmd):
         """Prepend Homebrew/MacPorts paths to PATH inside the shell command."""
-        return f'export PATH="{self._EXTRA_PATH}:$PATH"; {bash_cmd}'
+        return f'export PATH="{self._EXTRA_PATH}:$PATH" && {bash_cmd}'
 
     def run(self, bash_cmd, timeout=120):
-        full_cmd = ["bash", "-l", "-c", self._wrap(bash_cmd)]
+        full_cmd = ["bash", "-c", self._wrap(bash_cmd)]
+        env = self._env()
         try:
             result = subprocess.run(
                 full_cmd,
@@ -258,6 +259,7 @@ class MacExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s") from e
@@ -266,8 +268,13 @@ class MacExecutor(CommandExecutor):
             raise CommandError(bash_cmd, result.returncode, output.strip())
         return result.stdout
 
+    def _env(self):
+        env = os.environ.copy()
+        env["PATH"] = self._EXTRA_PATH + os.pathsep + env.get("PATH", "")
+        return env
+
     def stream(self, bash_cmd, timeout=600):
-        full_cmd = ["bash", "-l", "-c", self._wrap(bash_cmd)]
+        full_cmd = ["bash", "-c", self._wrap(bash_cmd)]
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
@@ -276,6 +283,7 @@ class MacExecutor(CommandExecutor):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=self._env(),
         )
         with self._lock:
             self._current_proc = proc
