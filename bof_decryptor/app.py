@@ -387,6 +387,10 @@ class App:
 
         self._save_settings()
 
+        # Auto-populate Write tab with the original .fun path and output folder
+        self.window.write_fun_var.set(fun_path)
+        self.window.write_input_var.set(output_path)
+
         self._active_mode = "decrypt"
         self.window.set_running(True, mode="decrypt")
         self.window.reset_steps(mode="decrypt")
@@ -408,28 +412,21 @@ class App:
     # ------------------------------------------------------------------
 
     def _start_modify(self):
+        original_fun = self.window.write_fun_var.get().strip()
         assets_dir = self.window.write_input_var.get().strip()
         output_dir = self.window.write_output_var.get().strip()
-        game_display = self.window.write_game_var.get().strip()
 
-        if not game_display:
+        if not original_fun:
             messagebox.showwarning("Missing Input",
-                "Please select a game first.")
+                "Please select the original .fun file.")
             return
-
-        # Parse game key from combobox text "Display Name (key)"
-        game_key = None
-        for key, display in KNOWN_GAMES.items():
-            if f"({key})" in game_display:
-                game_key = key
-                break
-        if game_key is None:
-            messagebox.showerror("Unknown Game", "Could not identify the selected game.")
+        if not os.path.isfile(original_fun):
+            messagebox.showerror("File Not Found",
+                f"Original .fun file not found:\n{original_fun}")
             return
-
         if not assets_dir:
             messagebox.showwarning("Missing Input",
-                "Please select an assets folder.")
+                "Please select the modified assets folder.")
             return
         if not os.path.isdir(assets_dir):
             messagebox.showerror("Invalid Folder",
@@ -440,9 +437,17 @@ class App:
                 "Please select an output folder.")
             return
 
-        # Build output path from folder + game's .fun filename
-        fun_file = GAME_DB[game_key]["fun_file"]
-        # If user already included the .fun filename in the folder path, use it directly
+        # Detect game from original .fun filename
+        game_key = detect_game(original_fun)
+        if game_key is None:
+            messagebox.showerror("Unknown File",
+                f"Cannot identify game from filename: "
+                f"{os.path.basename(original_fun)}\n\n"
+                f"Expected one of: {', '.join(FUN_FILE_TO_GAME.keys())}")
+            return
+
+        # Build output path from folder + original .fun filename
+        fun_file = os.path.basename(original_fun)
         if os.path.basename(output_dir).lower() == fun_file.lower():
             output_fun = output_dir
             output_dir = os.path.dirname(output_dir)
@@ -461,7 +466,7 @@ class App:
         done_cb = lambda s, m: self.msg_queue.put(DoneMsg(s, m))
 
         self.pipeline = ModifyPipeline(
-            assets_dir, output_fun, game_key, self.executor,
+            original_fun, assets_dir, output_fun, game_key, self.executor,
             log_cb, phase_cb, progress_cb, done_cb,
         )
         threading.Thread(target=self.pipeline.run, daemon=True).start()
@@ -616,6 +621,8 @@ class App:
                 self.window.fun_var.set(settings["fun_path"])
             if settings.get("output_path"):
                 self.window.output_var.set(settings["output_path"])
+            if settings.get("write_fun_path"):
+                self.window.write_fun_var.set(settings["write_fun_path"])
             if settings.get("write_input_path"):
                 self.window.write_input_var.set(settings["write_input_path"])
             if settings.get("write_output_path"):
@@ -627,6 +634,7 @@ class App:
         settings = {
             "fun_path": self.window.fun_var.get().strip(),
             "output_path": self.window.output_var.get().strip(),
+            "write_fun_path": self.window.write_fun_var.get().strip(),
             "write_input_path": self.window.write_input_var.get().strip(),
             "write_output_path": self.window.write_output_var.get().strip(),
             "theme": self.window._current_theme,

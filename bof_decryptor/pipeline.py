@@ -567,11 +567,12 @@ class DecryptPipeline(_BasePipeline):
 # ---------------------------------------------------------------------------
 
 class ModifyPipeline(_BasePipeline):
-    """Re-pack a modified Godot binary back into a .fun file."""
+    """Patch modified assets into a copy of the original .fun file."""
 
-    def __init__(self, assets_dir, output_fun_path, game_key, executor,
-                 log_cb, phase_cb, progress_cb, done_cb):
+    def __init__(self, original_fun, assets_dir, output_fun_path, game_key,
+                 executor, log_cb, phase_cb, progress_cb, done_cb):
         super().__init__(log_cb, phase_cb, progress_cb, done_cb)
+        self.original_fun = original_fun
         self.assets_dir = assets_dir
         self.output_fun_path = output_fun_path
         self.game_key = game_key
@@ -587,82 +588,110 @@ class ModifyPipeline(_BasePipeline):
 
     def _run(self):
         game_info = GAME_DB[self.game_key]
-
-        assets_wsl = self.executor.to_exec_path(self.assets_dir)
-        out_fun_wsl = self.executor.to_exec_path(self.output_fun_path)
         passphrase = game_info["passphrase"]
         game_key = self.game_key
         gpg_bin = self._resolve_gpg()
         self._log(f"Using gpg: {gpg_bin}", "info")
 
-        # Phase 0 — Scan: find the binary and detect changed PCK files
+        fun_wsl = self.executor.to_exec_path(self.original_fun)
+        out_fun_wsl = self.executor.to_exec_path(self.output_fun_path)
+        tmp_tar_wsl = f"/tmp/bof_{game_key}_mod.tar.gz"
+        tmp_dir_wsl = f"/tmp/bof_{game_key}_repack"
+
+        # Phase 0 — Decrypt original .fun → tar.gz → extract to temp dir
         self._set_phase(0)
-        self._log("Scanning assets...", "info")
+        self._log(f"Decrypting original {os.path.basename(self.original_fun)}...",
+                  "info")
+        self._progress(0, 100, "Decrypting original...")
+
+        fun_size = os.path.getsize(self.original_fun)
+        try:
+            with self._poll_file_progress(tmp_tar_wsl, fun_size, "Decrypting..."):
+                self.executor.run(
+                    f"{gpg_bin} --batch --yes --passphrase={passphrase!r} "
+                    f"--decrypt --output {tmp_tar_wsl!r} {fun_wsl!r} 2>&1",
+                    timeout=GPG_DECRYPT_TIMEOUT,
+                )
+        except CommandError as e:
+            raise PipelineError("Decrypt",
+                f"GPG decryption failed:\n{e.output}\n\n"
+                f"Check that the original .fun file is valid.")
+        self._log("Original decrypted.", "success")
+
+        # Extract tar to temp dir (preserves original structure)
+        self._progress(0, 100, "Extracting original...")
+        try:
+            self.executor.run(
+                f"rm -rf {tmp_dir_wsl!r} && mkdir -p {tmp_dir_wsl!r} && "
+                f"tar -xzf {tmp_tar_wsl!r} -C {tmp_dir_wsl!r} 2>&1",
+                timeout=TAR_EXTRACT_TIMEOUT,
+            )
+        except CommandError as e:
+            raise PipelineError("Decrypt",
+                f"tar extract failed:\n{e.output}")
+        self._log("Original extracted to temp dir.", "success")
+        self._check_cancel()
+
+        # Phase 1 — Patch: find changed PCK files and patch the binary
+        self._set_phase(1)
 
         pck_dir = os.path.join(self.assets_dir, "pck")
         has_pck = os.path.isdir(pck_dir)
 
-        # Find the Godot binary
+        # Find the Godot binary in the temp extract
         binary_wsl = ""
         try:
             binary_wsl = self.executor.run(
-                f"find {assets_wsl!r} -maxdepth 1 -name '*.x86_64' -type f | head -1",
+                f"find {tmp_dir_wsl!r} -name '*.x86_64' -type f | head -1",
                 timeout=15,
             ).strip()
         except Exception:
             pass
         if not binary_wsl:
-            raise PipelineError("Scan",
-                "No Godot binary (.x86_64) found in the assets folder.\n"
-                "Make sure the decrypted output folder is selected.")
+            raise PipelineError("Patch",
+                "No Godot binary (.x86_64) found in the extracted archive.")
 
         self._log(f"Binary: {os.path.basename(binary_wsl)}", "info")
 
-        # Detect changed PCK files by mtime.  gdre_export.log is written
-        # last during decrypt — any pck/ file newer than it was edited.
+        # Detect changed PCK files by mtime
         changed_pck = []
         if has_pck:
             export_log = os.path.join(pck_dir, "gdre_export.log")
             baseline_mtime = (os.path.getmtime(export_log)
                               if os.path.isfile(export_log) else 0)
 
+            _skip_names = {"gdre_export.log", ".DS_Store", "Thumbs.db", "desktop.ini"}
             for root, _dirs, files in os.walk(pck_dir):
                 if ".autoconverted" in root:
                     continue
                 for fname in files:
-                    if fname == "gdre_export.log":
+                    if fname in _skip_names:
                         continue
                     abs_path = os.path.join(root, fname)
                     if os.path.getmtime(abs_path) > baseline_mtime:
                         rel = os.path.relpath(abs_path, pck_dir).replace("\\", "/")
                         changed_pck.append(rel)
 
-            if changed_pck:
-                self._log(f"Found {len(changed_pck)} modified PCK file(s):", "info")
-                for f in changed_pck[:20]:
-                    self._log(f"  {f}", "info")
-                if len(changed_pck) > 20:
-                    self._log(f"  ... and {len(changed_pck) - 20} more", "info")
-            else:
-                self._log("No modified PCK files detected.", "info")
-        self._check_cancel()
-
-        # Phase 1 — Repack: patch changed files into the Godot binary's PCK
-        self._set_phase(1)
         if changed_pck:
+            self._log(f"Found {len(changed_pck)} modified PCK file(s):", "info")
+            for f in changed_pck[:20]:
+                self._log(f"  {f}", "info")
+            if len(changed_pck) > 20:
+                self._log(f"  ... and {len(changed_pck) - 20} more", "info")
+
             self._log(f"Patching {len(changed_pck)} file(s) into binary...", "info")
             self._progress(0, 100, "Patching PCK...")
 
-            pck_dir_wsl = f"{assets_wsl}/pck"
+            pck_dir_wsl = self.executor.to_exec_path(pck_dir)
             tmp_binary_wsl = f"/tmp/bof_{game_key}_patched.x86_64"
             gdre_prefix = self._gdre_prefix()
 
-            # Build --patch-file args: local_path=res://path
-            # Write to a temp script to avoid shell quoting / arg-length limits.
+            # Write patch args to a temp script to avoid quoting / arg-length limits
+            import base64 as _b64
             patch_script = f"/tmp/bof_{game_key}_patch.sh"
             script_lines = [
                 "#!/bin/bash",
-                f"set -e",
+                "set -e",
                 f'{gdre_prefix} \\',
                 f"  --pck-patch={binary_wsl!r} \\",
                 f"  --output={tmp_binary_wsl!r} \\",
@@ -674,9 +703,9 @@ class ModifyPipeline(_BasePipeline):
                 script_lines.append(
                     f"  '--patch-file={local_path}=res://{rel}'{cont}"
                 )
-            import base64 as _b64
-            script_content = "\n".join(script_lines) + "\n"
-            script_b64 = _b64.b64encode(script_content.encode()).decode()
+            script_b64 = _b64.b64encode(
+                ("\n".join(script_lines) + "\n").encode()
+            ).decode()
 
             self.executor.run(
                 f"echo {script_b64!r} | base64 -d > {patch_script} && "
@@ -684,9 +713,10 @@ class ModifyPipeline(_BasePipeline):
                 timeout=30,
             )
 
-            cmd = f"bash {patch_script} 2>&1"
             try:
-                for chunk in self.executor.stream(cmd, timeout=GDRE_TIMEOUT):
+                for chunk in self.executor.stream(
+                    f"bash {patch_script} 2>&1", timeout=GDRE_TIMEOUT
+                ):
                     for part in chunk.split("\r"):
                         part = part.strip()
                         if not part:
@@ -698,13 +728,12 @@ class ModifyPipeline(_BasePipeline):
                         elif part:
                             self._log(f"  {part}", "info")
             except CommandError as e:
-                raise PipelineError("Repack",
+                raise PipelineError("Patch",
                     f"GDRE patch failed:\n{e.output}\n\n"
                     f"Make sure GDRE Tools is installed and the changed files "
                     f"are valid Godot assets.")
 
-            # Replace the original binary with the patched one
-            binary_basename = os.path.basename(binary_wsl)
+            # Replace binary in the temp extract with the patched one
             try:
                 self.executor.run(
                     f"mv -f {tmp_binary_wsl!r} {binary_wsl!r} && "
@@ -712,67 +741,49 @@ class ModifyPipeline(_BasePipeline):
                     timeout=600,
                 )
             except CommandError as e:
-                raise PipelineError("Repack",
+                raise PipelineError("Patch",
                     f"Failed to replace binary:\n{e.output}")
 
-            self._log(f"Binary patched: {binary_basename}", "success")
-        elif has_pck:
-            self._log("No PCK changes — skipping repack.", "info")
+            self._log("Binary patched.", "success")
         else:
-            self._log("No pck/ folder — skipping repack.", "info")
+            self._log("No modified PCK files — using original binary.", "info")
         self._check_cancel()
 
-        # Phase 2 — Pack tar.gz (exclude pck/ folder — it's now in the binary)
+        # Phase 2 — Repack: re-tar the temp dir (same structure as original)
         self._set_phase(2)
-        self._log("Packing archive...", "info")
+        self._log("Repacking archive...", "info")
         self._progress(0, 100, "Creating tar.gz...")
 
-        # Estimate compressed output ≈ binary size (main payload, already
-        # mostly incompressible).  Used for progress polling.
-        binary_bytes = 0
+        repack_tar_wsl = f"/tmp/bof_{game_key}_repack.tar.gz"
         try:
-            binary_bytes = int(self.executor.run(
-                f"stat -f%z {0} 2>/dev/null || stat -c%s {binary_wsl!r} 2>/dev/null || echo 0",
-                timeout=10,
-            ).strip())
-        except Exception:
-            pass
-
-        tmp_tar_wsl = f"/tmp/bof_{game_key}_mod.tar.gz"
-        try:
-            with self._poll_file_progress(
-                tmp_tar_wsl, binary_bytes, "Packing..."
-            ) if binary_bytes else _nullctx():
-                self.executor.run(
-                    f"cd {assets_wsl!r} && "
-                    f"tar -czf {tmp_tar_wsl!r} "
-                    f"--exclude='.checksums.md5' "
-                    f"--exclude='pck' "
-                    f"--exclude='*.tar.gz' "
-                    f"--exclude='*.fun' "
-                    f". 2>&1",
-                    timeout=TAR_PACK_TIMEOUT,
-                )
+            # Use * glob (not .) to avoid ./ prefix and ./ directory entry,
+            # matching the original tar structure exactly.
+            self.executor.run(
+                f"cd {tmp_dir_wsl!r} && "
+                f"tar -czf {repack_tar_wsl!r} * 2>&1",
+                timeout=TAR_PACK_TIMEOUT,
+            )
         except CommandError as e:
-            raise PipelineError("Pack", f"tar failed:\n{e.output}")
+            raise PipelineError("Repack", f"tar repack failed:\n{e.output}")
 
-        # Get actual tar size for encrypt progress estimate
+        # Get tar size for encrypt progress
         tar_bytes = 0
         try:
             out = self.executor.run(
-                f"stat -f%z {tmp_tar_wsl!r} 2>/dev/null || stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
+                f"stat -f%z {repack_tar_wsl!r} 2>/dev/null || "
+                f"stat -c%s {repack_tar_wsl!r} 2>/dev/null || echo 0",
                 timeout=10,
             ).strip()
             tar_bytes = int(out)
             size_h = self.executor.run(
-                f"du -h {tmp_tar_wsl!r} | cut -f1", timeout=10
+                f"du -h {repack_tar_wsl!r} | cut -f1", timeout=10
             ).strip()
             self._log(f"Archive created ({size_h}).", "success")
         except Exception:
             self._log("Archive created.", "success")
         self._check_cancel()
 
-        # Phase 3 — GPG encrypt
+        # Phase 3 — Encrypt: GPG encrypt → output .fun
         self._set_phase(3)
         self._log(f"Encrypting to {os.path.basename(self.output_fun_path)}...", "info")
         self._progress(0, 100, "GPG encrypting...")
@@ -785,7 +796,7 @@ class ModifyPipeline(_BasePipeline):
                 self.executor.run(
                     f"{gpg_bin} --batch --yes --passphrase={passphrase!r} "
                     f"--symmetric --cipher-algo AES256 "
-                    f"--output {out_fun_wsl!r} {tmp_tar_wsl!r} 2>&1",
+                    f"--output {out_fun_wsl!r} {repack_tar_wsl!r} 2>&1",
                     timeout=GPG_ENCRYPT_TIMEOUT,
                 )
         except CommandError as e:
@@ -797,8 +808,9 @@ class ModifyPipeline(_BasePipeline):
         self._set_phase(4)
         try:
             self.executor.run(
-                f"rm -f {tmp_tar_wsl!r} /tmp/bof_{game_key}_patch.sh 2>/dev/null; true",
-                timeout=15
+                f"rm -rf {tmp_tar_wsl!r} {tmp_dir_wsl!r} {repack_tar_wsl!r} "
+                f"/tmp/bof_{game_key}_patch.sh 2>/dev/null; true",
+                timeout=30,
             )
         except Exception:
             pass

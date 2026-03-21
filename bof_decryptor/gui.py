@@ -119,6 +119,7 @@ class MainWindow:
         self.write_input_var = tk.StringVar()
         self.write_output_var = tk.StringVar()
         self.write_game_var = tk.StringVar()
+        self.write_fun_var = tk.StringVar()     # original .fun file for Write
         self.modify_input_var = tk.StringVar()  # alias used by app.py for export
 
         self._build_ui()
@@ -128,7 +129,9 @@ class MainWindow:
         # sync modify_input_var with write_input_var
         self.write_input_var.trace_add("write",
             lambda *_: self.modify_input_var.set(self.write_input_var.get()))
-        # update filename label when output folder changes
+        # update filename label when .fun file or output folder changes
+        self.write_fun_var.trace_add("write",
+            lambda *_: self._update_write_filename())
         self.write_output_var.trace_add("write",
             lambda *_: self._update_write_filename())
 
@@ -307,21 +310,21 @@ class MainWindow:
         ttk.Label(f, text="Re-pack modified assets into a .fun file for USB install.",
                   font=(_SANS_FONT, 9, "italic")).pack(anchor=tk.W, **pad)
 
-        # Game selection (first — drives the output filename)
-        row_game = ttk.Frame(f)
-        row_game.pack(fill=tk.X, **pad)
-        ttk.Label(row_game, text="Game:", width=16, anchor=tk.W).pack(side=tk.LEFT)
-        game_options = [f"{info} ({key})" for key, info in KNOWN_GAMES.items()]
-        self._write_game_cb = ttk.Combobox(
-            row_game, textvariable=self.write_game_var,
-            values=game_options, state="readonly", width=40)
-        self._write_game_cb.pack(side=tk.LEFT)
-        self._write_game_cb.bind("<<ComboboxSelected>>", self._on_game_selected)
+        # Original .fun file
+        row_fun = ttk.Frame(f)
+        row_fun.pack(fill=tk.X, **pad)
+        ttk.Label(row_fun, text="Original .fun:", width=16, anchor=tk.W).pack(
+            side=tk.LEFT)
+        ttk.Entry(row_fun, textvariable=self.write_fun_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row_fun, text="Browse...",
+                   command=self._browse_write_fun).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Assets folder
+        # Assets folder (with modified files)
         row = ttk.Frame(f)
         row.pack(fill=tk.X, **pad)
-        ttk.Label(row, text="Assets Folder:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Label(row, text="Modified Assets:", width=16, anchor=tk.W).pack(
+            side=tk.LEFT)
         ttk.Entry(row, textvariable=self.write_input_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(row, text="Browse...",
@@ -449,8 +452,16 @@ class MainWindow:
         if path:
             self.output_var.set(path)
 
+    def _browse_write_fun(self):
+        path = filedialog.askopenfilename(
+            title="Select original .fun file",
+            filetypes=[("BOF update files", "*.fun"), ("All files", "*.*")],
+        )
+        if path:
+            self.write_fun_var.set(path)
+
     def _browse_write_input(self):
-        path = filedialog.askdirectory(title="Select assets folder")
+        path = filedialog.askdirectory(title="Select assets folder (with modifications)")
         if path:
             self.write_input_var.set(path)
 
@@ -460,21 +471,12 @@ class MainWindow:
             self.write_output_var.set(path)
             self._update_write_filename()
 
-    def _on_game_selected(self, event=None):
-        """Update the generated filename label when a game is selected."""
-        self._update_write_filename()
-
     def _update_write_filename(self):
-        """Show the generated .fun filename based on game + output folder."""
-        game_display = self.write_game_var.get()
+        """Show the generated .fun filename based on original .fun + output folder."""
+        fun_path = self.write_fun_var.get().strip()
         out_dir = self.write_output_var.get().strip()
-        fun_file = ""
-        for key, display in KNOWN_GAMES.items():
-            if f"({key})" in game_display:
-                fun_file = GAME_DB[key]["fun_file"]
-                break
+        fun_file = os.path.basename(fun_path) if fun_path else ""
         if fun_file and out_dir:
-            # Don't double-append if user already included the .fun filename
             if os.path.basename(out_dir).lower() == fun_file.lower():
                 full = out_dir
             else:

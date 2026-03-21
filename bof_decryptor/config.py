@@ -47,9 +47,9 @@ DECRYPT_PHASES = [
 ]
 
 MODIFY_PHASES = [
-    "Scan",
+    "Decrypt",
+    "Patch",
     "Repack",
-    "Pack",
     "Encrypt",
     "Cleanup",
 ]
