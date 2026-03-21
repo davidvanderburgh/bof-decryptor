@@ -422,13 +422,6 @@ class App:
             messagebox.showerror("Unknown Game", "Could not identify the selected game.")
             return
 
-        checksums_file = os.path.join(assets_dir, ".checksums.md5")
-        if not os.path.isfile(checksums_file):
-            messagebox.showerror("No Baseline Checksums",
-                "No .checksums.md5 found in the assets folder.\n\n"
-                "Decrypt the game first to generate baseline checksums.")
-            return
-
         self._save_settings()
 
         self._active_mode = "modify"

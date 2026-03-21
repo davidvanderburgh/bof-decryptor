@@ -19,6 +19,11 @@ from .executor import CommandError
 
 CHECKSUMS_FILE = ".checksums.md5"
 
+class _nullctx:
+    """No-op context manager."""
+    def __enter__(self): return self
+    def __exit__(self, *exc): pass
+
 
 class PipelineError(Exception):
     def __init__(self, phase, message):
@@ -45,6 +50,56 @@ class _BasePipeline:
 
     def _set_phase(self, index):
         self._phase_cb(index)
+
+    def _poll_file_progress(self, wsl_path, expected_bytes, label=""):
+        """Return a context manager that polls a WSL file's size in a
+        background thread and updates the progress bar as a percentage
+        of *expected_bytes*.  Stops automatically on ``__exit__``."""
+        parent = self
+        stop = threading.Event()
+
+        def _poll():
+            while not stop.is_set():
+                try:
+                    out = parent.executor.run(
+                        f"du -sb {wsl_path!r} 2>/dev/null | cut -f1 || echo 0",
+                        timeout=5,
+                    ).strip()
+                    cur = int(out)
+                except Exception:
+                    cur = 0
+                if expected_bytes > 0:
+                    pct = min(int(100 * cur / expected_bytes), 99)
+                    parent._progress(pct, 100,
+                                     f"{label} {pct}%" if label else f"{pct}%")
+                stop.wait(1.0)
+
+        class _Ctx:
+            def __enter__(self_ctx):
+                self_ctx._t = threading.Thread(target=_poll, daemon=True)
+                self_ctx._t.start()
+                return self_ctx
+            def __exit__(self_ctx, *exc):
+                stop.set()
+                self_ctx._t.join(timeout=3)
+
+        return _Ctx()
+
+    def _gdre_prefix(self):
+        """Return the shell prefix to invoke GDRE Tools headlessly."""
+        if sys.platform == "darwin":
+            install_dir = os.path.expanduser("~/.local/share/gdre_tools")
+            return (
+                "GODOT_SILENCE_ROOT_WARNING=1 "
+                f"'{install_dir}/Godot RE Tools' --headless "
+            )
+        # Linux / WSL: needs xvfb for headless display
+        return (
+            "DISPLAY= WAYLAND_DISPLAY= "
+            "GODOT_SILENCE_ROOT_WARNING=1 "
+            "LD_LIBRARY_PATH=/opt/gdre_tools "
+            "xvfb-run -a /opt/gdre_tools/gdre_tools.x86_64 --headless "
+        )
 
     def run(self):
         raise NotImplementedError
@@ -216,22 +271,6 @@ class DecryptPipeline(_BasePipeline):
         self.unpack_pck = unpack_pck
         self._tmp_dir = None
 
-    def _gdre_prefix(self):
-        """Return the shell prefix to invoke GDRE Tools headlessly."""
-        if sys.platform == "darwin":
-            install_dir = os.path.expanduser("~/.local/share/gdre_tools")
-            return (
-                "GODOT_SILENCE_ROOT_WARNING=1 "
-                f"'{install_dir}/Godot RE Tools' --headless "
-            )
-        # Linux / WSL: needs xvfb for headless display
-        return (
-            "DISPLAY= WAYLAND_DISPLAY= "
-            "GODOT_SILENCE_ROOT_WARNING=1 "
-            "LD_LIBRARY_PATH=/opt/gdre_tools "
-            "xvfb-run -a /opt/gdre_tools/gdre_tools.x86_64 --headless "
-        )
-
     def run(self):
         try:
             self._run()
@@ -266,15 +305,17 @@ class DecryptPipeline(_BasePipeline):
         # Phase 1 — Decrypt
         self._set_phase(1)
         self._log(f"Decrypting {os.path.basename(self.fun_path)} with GPG...", "info")
-        self._progress(0, 0, "GPG decrypting...")
+        self._progress(0, 100, "GPG decrypting...")
 
+        fun_size = os.path.getsize(self.fun_path)
         tmp_tar_wsl = f"/tmp/bof_{game_key}.tar.gz"
         try:
-            self.executor.run(
-                f"gpg --batch --yes --passphrase={passphrase!r} "
-                f"--decrypt --output {tmp_tar_wsl!r} {fun_wsl!r} 2>&1",
-                timeout=GPG_DECRYPT_TIMEOUT,
-            )
+            with self._poll_file_progress(tmp_tar_wsl, fun_size, "Decrypting..."):
+                self.executor.run(
+                    f"gpg --batch --yes --passphrase={passphrase!r} "
+                    f"--decrypt --output {tmp_tar_wsl!r} {fun_wsl!r} 2>&1",
+                    timeout=GPG_DECRYPT_TIMEOUT,
+                )
         except CommandError as e:
             raise PipelineError("Decrypt",
                 f"GPG decryption failed:\n{e.output}\n\n"
@@ -285,16 +326,34 @@ class DecryptPipeline(_BasePipeline):
         # Phase 2 — Extract tar
         self._set_phase(2)
         self._log("Extracting archive...", "info")
-        self._progress(0, 0, "Extracting tar.gz...")
+        self._progress(0, 100, "Extracting tar.gz...")
+
+        # Get compressed size to estimate extraction progress.
+        # Uncompressed is typically ~2x the .tar.gz; we poll du -sb on the
+        # output directory vs that estimate.
+        tar_size = 0
+        try:
+            tar_size = int(self.executor.run(
+                f"stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
+                timeout=10,
+            ).strip())
+        except Exception:
+            pass
+        estimated_uncompressed = tar_size * 2 if tar_size else 0
 
         tmp_extract_wsl = f"/tmp/bof_{game_key}_extracted"
         try:
             self.executor.run(
-                f"rm -rf {tmp_extract_wsl!r} && "
-                f"mkdir -p {tmp_extract_wsl!r} && "
-                f"tar -xzf {tmp_tar_wsl!r} -C {tmp_extract_wsl!r} 2>&1",
-                timeout=TAR_EXTRACT_TIMEOUT,
+                f"rm -rf {tmp_extract_wsl!r} && mkdir -p {tmp_extract_wsl!r}",
+                timeout=30,
             )
+            with self._poll_file_progress(
+                tmp_extract_wsl, estimated_uncompressed, "Extracting..."
+            ) if estimated_uncompressed else _nullctx():
+                self.executor.run(
+                    f"tar -xzf {tmp_tar_wsl!r} -C {tmp_extract_wsl!r} 2>&1",
+                    timeout=TAR_EXTRACT_TIMEOUT,
+                )
         except CommandError as e:
             raise PipelineError("Extract", f"Archive extraction failed:\n{e.output}")
 
@@ -481,96 +540,177 @@ class ModifyPipeline(_BasePipeline):
     def _run(self):
         game_info = GAME_DB[self.game_key]
 
-        # Phase 0 — Scan for changes
-        self._set_phase(0)
-        self._log("Scanning for modified files...", "info")
-
-        checksums_file = os.path.join(self.assets_dir, CHECKSUMS_FILE)
-        if not os.path.isfile(checksums_file):
-            raise PipelineError("Scan",
-                f"No {CHECKSUMS_FILE} found.\n"
-                f"Decrypt the game first to generate baseline checksums.")
-
-        baseline = {}
-        with open(checksums_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if "\t" in line:
-                    path, md5 = line.rsplit("\t", 1)
-                    baseline[path] = md5
-
-        changed = []
-        for rel_path, orig_md5 in baseline.items():
-            abs_path = os.path.join(self.assets_dir, rel_path)
-            if not os.path.isfile(abs_path):
-                continue
-            if _md5_file(abs_path) != orig_md5:
-                changed.append(rel_path)
-
-        if not changed:
-            raise PipelineError("Scan",
-                "No modified files detected.\n"
-                "Modify the Godot binary or other files first.")
-
-        self._log(f"Found {len(changed)} modified file(s):", "info")
-        for f in changed:
-            self._log(f"  {f}", "info")
-        self._check_cancel()
-
         assets_wsl = self.executor.to_exec_path(self.assets_dir)
         out_fun_wsl = self.executor.to_exec_path(self.output_fun_path)
         passphrase = game_info["passphrase"]
         game_key = self.game_key
 
-        # Phase 1 — Pack tar.gz
-        self._set_phase(1)
-        self._log("Packing archive...", "info")
-        self._progress(0, 0, "Creating tar.gz...")
+        # Phase 0 — Scan: find the binary and collect all PCK files
+        self._set_phase(0)
+        self._log("Scanning assets...", "info")
 
-        tmp_tar_wsl = f"/tmp/bof_{game_key}_mod.tar.gz"
-        try:
-            self.executor.run(
-                f"cd {assets_wsl!r} && "
-                f"tar -czf {tmp_tar_wsl!r} "
-                f"--exclude='.checksums.md5' "
-                f"--exclude='*.tar.gz' "
-                f"--exclude='*.fun' "
-                f". 2>&1",
-                timeout=TAR_PACK_TIMEOUT,
-            )
-        except CommandError as e:
-            raise PipelineError("Pack", f"tar failed:\n{e.output}")
+        pck_dir = os.path.join(self.assets_dir, "pck")
+        has_pck = os.path.isdir(pck_dir)
 
-        size_out = ""
+        # Find the Godot binary
+        binary_wsl = ""
         try:
-            size_out = self.executor.run(
-                f"du -h {tmp_tar_wsl!r} | cut -f1", timeout=10
+            binary_wsl = self.executor.run(
+                f"find {assets_wsl!r} -maxdepth 1 -name '*.x86_64' -type f | head -1",
+                timeout=15,
             ).strip()
         except Exception:
             pass
-        self._log(f"Archive created{f' ({size_out})' if size_out else ''}.", "success")
+        if not binary_wsl:
+            raise PipelineError("Scan",
+                "No Godot binary (.x86_64) found in the assets folder.\n"
+                "Make sure the decrypted output folder is selected.")
+
+        self._log(f"Binary: {os.path.basename(binary_wsl)}", "info")
+        if has_pck:
+            pck_count = sum(len(fs) for _, _, fs in os.walk(pck_dir))
+            self._log(f"PCK assets: {pck_count} files", "info")
         self._check_cancel()
 
-        # Phase 2 — GPG encrypt
+        # Phase 1 — Repack: create new PCK from pck/ and embed into binary
+        self._set_phase(1)
+        if has_pck:
+            self._log("Repacking assets into Godot binary...", "info")
+            self._progress(0, 100, "Creating PCK...")
+
+            pck_dir_wsl = f"{assets_wsl}/pck"
+            tmp_binary_wsl = f"/tmp/bof_{game_key}_repacked.x86_64"
+            gdre_prefix = self._gdre_prefix()
+
+            # Detect engine version from gdre_export.log
+            engine_version = "4.3.0"
+            export_log = os.path.join(pck_dir, "gdre_export.log")
+            if os.path.isfile(export_log):
+                with open(export_log, "r") as f:
+                    for line in f:
+                        m = re.search(r'Detected Engine Version:\s*(\d+\.\d+\.\d+)', line)
+                        if m:
+                            engine_version = m.group(1)
+                            break
+            self._log(f"  Engine version: {engine_version}", "info")
+
+            cmd = (
+                f"{gdre_prefix} "
+                f"--pck-create={pck_dir_wsl!r} "
+                f"--output={tmp_binary_wsl!r} "
+                f"--embed={binary_wsl!r} "
+                f"--pck-version=2 "
+                f"--pck-engine-version={engine_version} "
+                f"2>&1"
+            )
+            try:
+                for chunk in self.executor.stream(cmd, timeout=GDRE_TIMEOUT):
+                    for part in chunk.split("\r"):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        pct_match = re.search(r'(\d+)%', part)
+                        if pct_match:
+                            pct = int(pct_match.group(1))
+                            self._progress(pct, 100, f"Repacking... {pct}%")
+                        elif part:
+                            self._log(f"  {part}", "info")
+            except CommandError as e:
+                raise PipelineError("Repack",
+                    f"GDRE repack failed:\n{e.output}\n\n"
+                    f"Make sure GDRE Tools is installed and the pck/ folder "
+                    f"contains valid Godot assets.")
+
+            # Replace the original binary with the repacked one
+            binary_basename = os.path.basename(binary_wsl)
+            try:
+                self.executor.run(
+                    f"mv -f {tmp_binary_wsl!r} {binary_wsl!r} && "
+                    f"chmod +x {binary_wsl!r}",
+                    timeout=120,
+                )
+            except CommandError as e:
+                raise PipelineError("Repack",
+                    f"Failed to replace binary:\n{e.output}")
+
+            self._log(f"Binary repacked: {binary_basename}", "success")
+        else:
+            self._log("No pck/ folder — skipping repack.", "info")
+        self._check_cancel()
+
+        # Phase 2 — Pack tar.gz (exclude pck/ folder — it's now in the binary)
         self._set_phase(2)
+        self._log("Packing archive...", "info")
+        self._progress(0, 100, "Creating tar.gz...")
+
+        # Estimate compressed output ≈ binary size (main payload, already
+        # mostly incompressible).  Used for progress polling.
+        binary_bytes = 0
+        try:
+            binary_bytes = int(self.executor.run(
+                f"stat -c%s {binary_wsl!r} 2>/dev/null || echo 0",
+                timeout=10,
+            ).strip())
+        except Exception:
+            pass
+
+        tmp_tar_wsl = f"/tmp/bof_{game_key}_mod.tar.gz"
+        try:
+            with self._poll_file_progress(
+                tmp_tar_wsl, binary_bytes, "Packing..."
+            ) if binary_bytes else _nullctx():
+                self.executor.run(
+                    f"cd {assets_wsl!r} && "
+                    f"tar -czf {tmp_tar_wsl!r} "
+                    f"--exclude='.checksums.md5' "
+                    f"--exclude='pck' "
+                    f"--exclude='*.tar.gz' "
+                    f"--exclude='*.fun' "
+                    f". 2>&1",
+                    timeout=TAR_PACK_TIMEOUT,
+                )
+        except CommandError as e:
+            raise PipelineError("Pack", f"tar failed:\n{e.output}")
+
+        # Get actual tar size for encrypt progress estimate
+        tar_bytes = 0
+        try:
+            out = self.executor.run(
+                f"stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
+                timeout=10,
+            ).strip()
+            tar_bytes = int(out)
+            size_h = self.executor.run(
+                f"du -h {tmp_tar_wsl!r} | cut -f1", timeout=10
+            ).strip()
+            self._log(f"Archive created ({size_h}).", "success")
+        except Exception:
+            self._log("Archive created.", "success")
+        self._check_cancel()
+
+        # Phase 3 — GPG encrypt
+        self._set_phase(3)
         self._log(f"Encrypting to {os.path.basename(self.output_fun_path)}...", "info")
-        self._progress(0, 0, "GPG encrypting...")
+        self._progress(0, 100, "GPG encrypting...")
 
         os.makedirs(os.path.dirname(self.output_fun_path) or ".", exist_ok=True)
         try:
-            self.executor.run(
-                f"gpg --batch --yes --passphrase={passphrase!r} "
-                f"--symmetric --cipher-algo AES256 "
-                f"--output {out_fun_wsl!r} {tmp_tar_wsl!r} 2>&1",
-                timeout=GPG_ENCRYPT_TIMEOUT,
-            )
+            with self._poll_file_progress(
+                out_fun_wsl, tar_bytes, "Encrypting..."
+            ) if tar_bytes else _nullctx():
+                self.executor.run(
+                    f"gpg --batch --yes --passphrase={passphrase!r} "
+                    f"--symmetric --cipher-algo AES256 "
+                    f"--output {out_fun_wsl!r} {tmp_tar_wsl!r} 2>&1",
+                    timeout=GPG_ENCRYPT_TIMEOUT,
+                )
         except CommandError as e:
             raise PipelineError("Encrypt", f"GPG encryption failed:\n{e.output}")
         self._log("GPG encryption complete.", "success")
         self._check_cancel()
 
-        # Phase 3 — Cleanup
-        self._set_phase(3)
+        # Phase 4 — Cleanup
+        self._set_phase(4)
         try:
             self.executor.run(
                 f"rm -f {tmp_tar_wsl!r} 2>/dev/null; true", timeout=15

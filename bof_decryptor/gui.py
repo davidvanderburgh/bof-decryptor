@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 import webbrowser
 
-from .config import KNOWN_GAMES, DECRYPT_PHASES, MODIFY_PHASES
+from .config import GAME_DB, KNOWN_GAMES, DECRYPT_PHASES, MODIFY_PHASES
 
 
 def _platform_font():
@@ -334,6 +334,7 @@ class MainWindow:
             row3, textvariable=self.write_game_var,
             values=game_options, state="readonly", width=40)
         self._write_game_cb.pack(side=tk.LEFT)
+        self._write_game_cb.bind("<<ComboboxSelected>>", self._on_game_selected)
 
         # Warning
         self._write_warn = ttk.Label(f, text="", foreground="#f44747",
@@ -448,13 +449,38 @@ class MainWindow:
             self.write_input_var.set(path)
 
     def _browse_write_output(self):
+        # Default to the correct .fun filename for the selected game
+        initial = ""
+        game_display = self.write_game_var.get()
+        for key, display in KNOWN_GAMES.items():
+            if f"({key})" in game_display:
+                initial = GAME_DB[key]["fun_file"]
+                break
         path = filedialog.asksaveasfilename(
             title="Save .fun file as",
             defaultextension=".fun",
+            initialfile=initial,
             filetypes=[("BOF update files", "*.fun"), ("All files", "*.*")],
         )
         if path:
             self.write_output_var.set(path)
+
+    def _on_game_selected(self, event=None):
+        """Auto-set the output .fun filename when a game is selected."""
+        game_display = self.write_game_var.get()
+        for key, display in KNOWN_GAMES.items():
+            if f"({key})" in game_display:
+                fun_file = GAME_DB[key]["fun_file"]
+                # If output is empty or already a .fun file, update it
+                current = self.write_output_var.get().strip()
+                if not current or current.endswith(".fun"):
+                    # Preserve the directory, just change the filename
+                    if current:
+                        dirname = os.path.dirname(current)
+                        self.write_output_var.set(os.path.join(dirname, fun_file))
+                    else:
+                        self.write_output_var.set(fun_file)
+                break
 
     # ------------------------------------------------------------------
     # Dynamic UI state
@@ -559,6 +585,7 @@ class MainWindow:
 
     def set_progress(self, current, total, desc="", mode="decrypt"):
         if total > 0:
+            self._progress_bar.stop()
             self._progress_bar.configure(mode="determinate")
             self._progress_bar["value"] = int(100 * current / total)
         else:
