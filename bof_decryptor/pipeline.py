@@ -545,7 +545,7 @@ class ModifyPipeline(_BasePipeline):
         passphrase = game_info["passphrase"]
         game_key = self.game_key
 
-        # Phase 0 — Scan: find the binary and collect all PCK files
+        # Phase 0 — Scan: find the binary and detect changed PCK files
         self._set_phase(0)
         self._log("Scanning assets...", "info")
 
@@ -567,40 +567,58 @@ class ModifyPipeline(_BasePipeline):
                 "Make sure the decrypted output folder is selected.")
 
         self._log(f"Binary: {os.path.basename(binary_wsl)}", "info")
+
+        # Detect changed PCK files by mtime.  gdre_export.log is written
+        # last during decrypt — any pck/ file newer than it was edited.
+        changed_pck = []
         if has_pck:
-            pck_count = sum(len(fs) for _, _, fs in os.walk(pck_dir))
-            self._log(f"PCK assets: {pck_count} files", "info")
+            export_log = os.path.join(pck_dir, "gdre_export.log")
+            baseline_mtime = (os.path.getmtime(export_log)
+                              if os.path.isfile(export_log) else 0)
+
+            for root, _dirs, files in os.walk(pck_dir):
+                if ".autoconverted" in root:
+                    continue
+                for fname in files:
+                    if fname == "gdre_export.log":
+                        continue
+                    abs_path = os.path.join(root, fname)
+                    if os.path.getmtime(abs_path) > baseline_mtime:
+                        rel = os.path.relpath(abs_path, pck_dir).replace("\\", "/")
+                        changed_pck.append(rel)
+
+            if changed_pck:
+                self._log(f"Found {len(changed_pck)} modified PCK file(s):", "info")
+                for f in changed_pck[:20]:
+                    self._log(f"  {f}", "info")
+                if len(changed_pck) > 20:
+                    self._log(f"  ... and {len(changed_pck) - 20} more", "info")
+            else:
+                self._log("No modified PCK files detected.", "info")
         self._check_cancel()
 
-        # Phase 1 — Repack: create new PCK from pck/ and embed into binary
+        # Phase 1 — Repack: patch changed files into the Godot binary's PCK
         self._set_phase(1)
-        if has_pck:
-            self._log("Repacking assets into Godot binary...", "info")
-            self._progress(0, 100, "Creating PCK...")
+        if changed_pck:
+            self._log(f"Patching {len(changed_pck)} file(s) into binary...", "info")
+            self._progress(0, 100, "Patching PCK...")
 
             pck_dir_wsl = f"{assets_wsl}/pck"
-            tmp_binary_wsl = f"/tmp/bof_{game_key}_repacked.x86_64"
+            tmp_binary_wsl = f"/tmp/bof_{game_key}_patched.x86_64"
             gdre_prefix = self._gdre_prefix()
 
-            # Detect engine version from gdre_export.log
-            engine_version = "4.3.0"
-            export_log = os.path.join(pck_dir, "gdre_export.log")
-            if os.path.isfile(export_log):
-                with open(export_log, "r") as f:
-                    for line in f:
-                        m = re.search(r'Detected Engine Version:\s*(\d+\.\d+\.\d+)', line)
-                        if m:
-                            engine_version = m.group(1)
-                            break
-            self._log(f"  Engine version: {engine_version}", "info")
+            # Build --patch-file args: local_path=res://path
+            patch_args = []
+            for rel in changed_pck:
+                local_path = f"{pck_dir_wsl}/{rel}"
+                patch_args.append(f"--patch-file={local_path}=res://{rel}")
 
             cmd = (
                 f"{gdre_prefix} "
-                f"--pck-create={pck_dir_wsl!r} "
+                f"--pck-patch={binary_wsl!r} "
                 f"--output={tmp_binary_wsl!r} "
                 f"--embed={binary_wsl!r} "
-                f"--pck-version=2 "
-                f"--pck-engine-version={engine_version} "
+                f"{' '.join(patch_args)} "
                 f"2>&1"
             )
             try:
@@ -612,16 +630,16 @@ class ModifyPipeline(_BasePipeline):
                         pct_match = re.search(r'(\d+)%', part)
                         if pct_match:
                             pct = int(pct_match.group(1))
-                            self._progress(pct, 100, f"Repacking... {pct}%")
+                            self._progress(pct, 100, f"Patching... {pct}%")
                         elif part:
                             self._log(f"  {part}", "info")
             except CommandError as e:
                 raise PipelineError("Repack",
-                    f"GDRE repack failed:\n{e.output}\n\n"
-                    f"Make sure GDRE Tools is installed and the pck/ folder "
-                    f"contains valid Godot assets.")
+                    f"GDRE patch failed:\n{e.output}\n\n"
+                    f"Make sure GDRE Tools is installed and the changed files "
+                    f"are valid Godot assets.")
 
-            # Replace the original binary with the repacked one
+            # Replace the original binary with the patched one
             binary_basename = os.path.basename(binary_wsl)
             try:
                 self.executor.run(
@@ -633,7 +651,9 @@ class ModifyPipeline(_BasePipeline):
                 raise PipelineError("Repack",
                     f"Failed to replace binary:\n{e.output}")
 
-            self._log(f"Binary repacked: {binary_basename}", "success")
+            self._log(f"Binary patched: {binary_basename}", "success")
+        elif has_pck:
+            self._log("No PCK changes — skipping repack.", "info")
         else:
             self._log("No pck/ folder — skipping repack.", "info")
         self._check_cancel()
