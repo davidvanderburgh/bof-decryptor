@@ -92,11 +92,23 @@ class _BasePipeline:
                 "command -v gpg 2>/dev/null || which gpg 2>/dev/null",
                 timeout=10,
             ).strip()
-            if path:
+            if path and path != "gpg":
                 return path
         except Exception:
             pass
-        return "gpg"  # fallback — let the shell try
+        # Fallback: probe common install locations directly
+        for candidate in [
+            "/opt/homebrew/bin/gpg",
+            "/usr/local/bin/gpg",
+            "/usr/local/MacGPG2/bin/gpg",
+            "/opt/local/bin/gpg",
+        ]:
+            try:
+                self.executor.run(f"test -x {candidate}", timeout=5)
+                return candidate
+            except Exception:
+                continue
+        return "gpg"  # last resort
 
     def _gdre_prefix(self):
         """Return the shell prefix to invoke GDRE Tools headlessly."""
@@ -141,8 +153,12 @@ def check_prerequisites(executor):
 
     # gpg
     try:
-        out = executor.run("gpg --version 2>&1 | head -1", timeout=10).strip()
-        results.append(("gpg", True, out or "available"))
+        executor.run("gpg --version 2>&1 | head -1", timeout=10)
+        gpg_path = executor.run(
+            "command -v gpg 2>/dev/null || which gpg 2>/dev/null || echo gpg",
+            timeout=10,
+        ).strip()
+        results.append(("gpg", True, gpg_path))
     except Exception:
         results.append(("gpg", False, "Not found — install with: apt-get install gnupg"))
 
@@ -315,6 +331,7 @@ class DecryptPipeline(_BasePipeline):
         fun_wsl = self.executor.to_exec_path(self.fun_path)
         out_wsl = self.executor.to_exec_path(self.output_dir)
         gpg_bin = self._resolve_gpg()
+        self._log(f"Using gpg: {gpg_bin}", "info")
 
         # Phase 1 — Decrypt
         self._set_phase(1)
@@ -559,6 +576,7 @@ class ModifyPipeline(_BasePipeline):
         passphrase = game_info["passphrase"]
         game_key = self.game_key
         gpg_bin = self._resolve_gpg()
+        self._log(f"Using gpg: {gpg_bin}", "info")
 
         # Phase 0 — Scan: find the binary and detect changed PCK files
         self._set_phase(0)
