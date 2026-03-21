@@ -62,7 +62,7 @@ class _BasePipeline:
             while not stop.is_set():
                 try:
                     out = parent.executor.run(
-                        f"du -sb {wsl_path!r} 2>/dev/null | cut -f1 || echo 0",
+                        f"stat -f%z {wsl_path!r} 2>/dev/null || stat -c%s {wsl_path!r} 2>/dev/null || echo 0",
                         timeout=5,
                     ).strip()
                     cur = int(out)
@@ -334,7 +334,7 @@ class DecryptPipeline(_BasePipeline):
         tar_size = 0
         try:
             tar_size = int(self.executor.run(
-                f"stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
+                f"stat -f%z {tmp_tar_wsl!r} 2>/dev/null || stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
                 timeout=10,
             ).strip())
         except Exception:
@@ -608,19 +608,33 @@ class ModifyPipeline(_BasePipeline):
             gdre_prefix = self._gdre_prefix()
 
             # Build --patch-file args: local_path=res://path
-            patch_args = []
-            for rel in changed_pck:
+            # Write to a temp script to avoid shell quoting / arg-length limits.
+            patch_script = f"/tmp/bof_{game_key}_patch.sh"
+            script_lines = [
+                "#!/bin/bash",
+                f"set -e",
+                f'{gdre_prefix} \\',
+                f"  --pck-patch={binary_wsl!r} \\",
+                f"  --output={tmp_binary_wsl!r} \\",
+                f"  --embed={binary_wsl!r} \\",
+            ]
+            for i, rel in enumerate(changed_pck):
                 local_path = f"{pck_dir_wsl}/{rel}"
-                patch_args.append(f"--patch-file={local_path}=res://{rel}")
+                cont = " \\" if i < len(changed_pck) - 1 else ""
+                script_lines.append(
+                    f"  '--patch-file={local_path}=res://{rel}'{cont}"
+                )
+            import base64 as _b64
+            script_content = "\n".join(script_lines) + "\n"
+            script_b64 = _b64.b64encode(script_content.encode()).decode()
 
-            cmd = (
-                f"{gdre_prefix} "
-                f"--pck-patch={binary_wsl!r} "
-                f"--output={tmp_binary_wsl!r} "
-                f"--embed={binary_wsl!r} "
-                f"{' '.join(patch_args)} "
-                f"2>&1"
+            self.executor.run(
+                f"echo {script_b64!r} | base64 -d > {patch_script} && "
+                f"chmod +x {patch_script}",
+                timeout=30,
             )
+
+            cmd = f"bash {patch_script} 2>&1"
             try:
                 for chunk in self.executor.stream(cmd, timeout=GDRE_TIMEOUT):
                     for part in chunk.split("\r"):
@@ -668,7 +682,7 @@ class ModifyPipeline(_BasePipeline):
         binary_bytes = 0
         try:
             binary_bytes = int(self.executor.run(
-                f"stat -c%s {binary_wsl!r} 2>/dev/null || echo 0",
+                f"stat -f%z {0} 2>/dev/null || stat -c%s {binary_wsl!r} 2>/dev/null || echo 0",
                 timeout=10,
             ).strip())
         except Exception:
@@ -696,7 +710,7 @@ class ModifyPipeline(_BasePipeline):
         tar_bytes = 0
         try:
             out = self.executor.run(
-                f"stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
+                f"stat -f%z {tmp_tar_wsl!r} 2>/dev/null || stat -c%s {tmp_tar_wsl!r} 2>/dev/null || echo 0",
                 timeout=10,
             ).strip()
             tar_bytes = int(out)
@@ -733,7 +747,8 @@ class ModifyPipeline(_BasePipeline):
         self._set_phase(4)
         try:
             self.executor.run(
-                f"rm -f {tmp_tar_wsl!r} 2>/dev/null; true", timeout=15
+                f"rm -f {tmp_tar_wsl!r} /tmp/bof_{game_key}_patch.sh 2>/dev/null; true",
+                timeout=15
             )
         except Exception:
             pass

@@ -425,7 +425,12 @@ class App:
 
         # Build output path from folder + game's .fun filename
         fun_file = GAME_DB[game_key]["fun_file"]
-        output_fun = os.path.join(output_dir, fun_file)
+        # If user already included the .fun filename in the folder path, use it directly
+        if os.path.basename(output_dir).lower() == fun_file.lower():
+            output_fun = output_dir
+            output_dir = os.path.dirname(output_dir)
+        else:
+            output_fun = os.path.join(output_dir, fun_file)
 
         self._save_settings()
 
