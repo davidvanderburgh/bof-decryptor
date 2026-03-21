@@ -87,6 +87,19 @@ class _BasePipeline:
 
     def _resolve_gpg(self):
         """Return full path to gpg, ensuring it's found even in macOS .app bundles."""
+        # 1. On macOS/Linux: check common paths directly from Python (no bash)
+        if sys.platform != "win32":
+            for candidate in [
+                "/opt/homebrew/bin/gpg",
+                "/usr/local/bin/gpg",
+                "/usr/local/MacGPG2/bin/gpg",
+                "/opt/local/bin/gpg",
+                "/usr/bin/gpg",
+            ]:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+
+        # 2. Ask the executor (goes through bash/WSL)
         try:
             path = self.executor.run(
                 "command -v gpg 2>/dev/null || which gpg 2>/dev/null",
@@ -96,18 +109,6 @@ class _BasePipeline:
                 return path
         except Exception:
             pass
-        # Fallback: probe common install locations directly
-        for candidate in [
-            "/opt/homebrew/bin/gpg",
-            "/usr/local/bin/gpg",
-            "/usr/local/MacGPG2/bin/gpg",
-            "/opt/local/bin/gpg",
-        ]:
-            try:
-                self.executor.run(f"test -x {candidate}", timeout=5)
-                return candidate
-            except Exception:
-                continue
         return "gpg"  # last resort
 
     def _gdre_prefix(self):
@@ -151,16 +152,32 @@ def check_prerequisites(executor):
     if not ok:
         return results
 
-    # gpg
-    try:
-        executor.run("gpg --version 2>&1 | head -1", timeout=10)
-        gpg_path = executor.run(
-            "command -v gpg 2>/dev/null || which gpg 2>/dev/null || echo gpg",
-            timeout=10,
-        ).strip()
+    # gpg — check common paths directly from Python first (avoids bash PATH issues)
+    gpg_path = None
+    if sys.platform != "win32":
+        for candidate in [
+            "/opt/homebrew/bin/gpg", "/usr/local/bin/gpg",
+            "/usr/local/MacGPG2/bin/gpg", "/opt/local/bin/gpg", "/usr/bin/gpg",
+        ]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                gpg_path = candidate
+                break
+    if gpg_path:
         results.append(("gpg", True, gpg_path))
-    except Exception:
-        results.append(("gpg", False, "Not found — install with: apt-get install gnupg"))
+    else:
+        try:
+            executor.run("gpg --version 2>&1 | head -1", timeout=10)
+            gpg_path = executor.run(
+                "command -v gpg 2>/dev/null || which gpg 2>/dev/null || echo gpg",
+                timeout=10,
+            ).strip()
+            results.append(("gpg", True, gpg_path))
+        except Exception:
+            if sys.platform == "darwin":
+                msg = "Not found — install with: brew install gnupg"
+            else:
+                msg = "Not found — install with: apt-get install gnupg"
+            results.append(("gpg", False, msg))
 
     # tar
     try:
