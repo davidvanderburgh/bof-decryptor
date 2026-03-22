@@ -187,12 +187,10 @@ class App:
 
             # Install base packages
             if platform == "win32":
-                # Wait for dpkg lock (unattended-upgrades may hold it on WSL startup)
+                # Kill unattended-upgrades if it holds the dpkg lock
                 pkg_cmd = (
-                    "for i in $(seq 1 30); do "
-                    "  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; "
-                    "  echo 'Waiting for package manager lock...'; sleep 2; "
-                    "done && "
+                    "pkill -9 unattended-upgr 2>/dev/null; "
+                    "dpkg --configure -a 2>/dev/null; "
                     "apt-get update -qq && "
                     "apt-get install -y gnupg tar curl unzip xvfb webp 2>&1"
                 )
@@ -388,10 +386,11 @@ class App:
                     if line.strip():
                         self.msg_queue.put(LogMsg(f"  {line}", "info"))
                 self.executor.run(
+                    f"mkdir -p '{os.path.dirname(GODOT_HEADLESS_PATH)}' && "
                     "unzip -o /tmp/godot.zip -d /tmp/godot_extract && "
-                    "sudo cp '/tmp/godot_extract/Godot.app/Contents/MacOS/Godot' "
-                    f"  {GODOT_HEADLESS_PATH} && "
-                    f"sudo chmod +x {GODOT_HEADLESS_PATH} && "
+                    f"cp '/tmp/godot_extract/Godot.app/Contents/MacOS/Godot' "
+                    f"  '{GODOT_HEADLESS_PATH}' && "
+                    f"chmod +x '{GODOT_HEADLESS_PATH}' && "
                     "rm -rf /tmp/godot.zip /tmp/godot_extract",
                     timeout=60,
                 )

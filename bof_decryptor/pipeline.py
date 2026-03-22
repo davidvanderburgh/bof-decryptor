@@ -20,7 +20,7 @@ from .executor import CommandError
 CHECKSUMS_FILE = ".checksums.md5"
 GODOT_VERSION = "4.4.1"
 if sys.platform == "darwin":
-    GODOT_HEADLESS_PATH = f"/usr/local/bin/godot"
+    GODOT_HEADLESS_PATH = os.path.expanduser("~/.local/bin/godot")
 else:
     GODOT_HEADLESS_PATH = f"/opt/Godot_v{GODOT_VERSION}-stable_linux.x86_64"
 
