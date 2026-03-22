@@ -140,7 +140,11 @@ class _BasePipeline:
     def _godot_headless_prefix(self):
         """Return the shell prefix to invoke Godot 4 headlessly."""
         if sys.platform == "darwin":
-            return f"GODOT_SILENCE_ROOT_WARNING=1 {GODOT_HEADLESS_PATH} --headless "
+            # Clear quarantine in case it wasn't cleared during install
+            return (
+                f"xattr -cr '{GODOT_HEADLESS_PATH}' 2>/dev/null; "
+                f"GODOT_SILENCE_ROOT_WARNING=1 '{GODOT_HEADLESS_PATH}' --headless "
+            )
         return (
             "DISPLAY= WAYLAND_DISPLAY= "
             "GODOT_SILENCE_ROOT_WARNING=1 "
