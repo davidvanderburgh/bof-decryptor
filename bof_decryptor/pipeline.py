@@ -747,18 +747,40 @@ func _convert_wav(src: String, dst: String):
             args_parts.append(f"'{src_wsl}' '{dst_wsl}'")
 
         godot = self._godot_headless_prefix()
+        self._log(f"  Reimporting {len(jobs)} audio file(s) via Godot...", "info")
+        self._log(f"    Using: {GODOT_HEADLESS_PATH}", "info")
         cmd = (
             f"{godot} --script {script_path} -- "
             f"{' '.join(args_parts)} 2>&1"
         )
-        self._log(f"  Reimporting {len(jobs)} audio file(s) via Godot...", "info")
         try:
-            for line in self.executor.stream(cmd, timeout=300):
+            output = self.executor.run(cmd, timeout=300)
+            for line in output.splitlines():
                 line = line.strip()
-                if line.startswith("OK ") or line.startswith("FAIL "):
-                    self._log(f"    {line}", "info" if line.startswith("OK") else "error")
+                if not line:
+                    continue
+                if line.startswith("OK "):
+                    self._log(f"    {line}", "success")
+                else:
+                    self._log(f"    {line}", "info")
         except CommandError as e:
-            self._log(f"  Audio reimport warning: {e.output}", "error")
+            self._log(f"  Audio reimport failed (exit {e.returncode}):", "error")
+            for line in (e.output or "").splitlines():
+                line = line.strip()
+                if line:
+                    self._log(f"    {line}", "error")
+
+        # Verify each converted file was actually written
+        failed = set()
+        for rel_src, dest_rel, ext in jobs:
+            dest_abs = os.path.join(pck_dir, dest_rel)
+            src_abs = os.path.join(pck_dir, rel_src)
+            src_mtime = os.path.getmtime(src_abs)
+            if not os.path.isfile(dest_abs) or os.path.getmtime(dest_abs) < src_mtime:
+                self._log(f"    WARNING: reimport failed for {rel_src}", "error")
+                failed.add(dest_rel)
+        # Remove failed entries so they don't get patched with stale data
+        jobs[:] = [(s, d, e) for s, d, e in jobs if d not in failed]
 
     def _reimport_textures(self, jobs, pck_dir, pck_dir_wsl):
         """Convert png/jpg source files to Godot .ctex using cwebp + GST2 header."""
