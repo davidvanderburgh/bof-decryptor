@@ -187,8 +187,15 @@ class App:
 
             # Install base packages
             if platform == "win32":
-                pkg_cmd = ("apt-get update -qq && "
-                           "apt-get install -y gnupg tar curl unzip xvfb webp 2>&1")
+                # Wait for dpkg lock (unattended-upgrades may hold it on WSL startup)
+                pkg_cmd = (
+                    "for i in $(seq 1 30); do "
+                    "  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; "
+                    "  echo 'Waiting for package manager lock...'; sleep 2; "
+                    "done && "
+                    "apt-get update -qq && "
+                    "apt-get install -y gnupg tar curl unzip xvfb webp 2>&1"
+                )
             elif platform == "darwin":
                 # Check if Homebrew is installed; if not, install it first
                 try:
@@ -354,7 +361,7 @@ class App:
     def _install_godot_headless(self):
         """Download and install Godot 4 headless binary for asset reimport."""
         import sys as _sys
-        from .pipeline import GODOT_HEADLESS_PATH
+        from .pipeline import GODOT_HEADLESS_PATH, GODOT_VERSION
 
         platform = _sys.platform
 
@@ -366,34 +373,48 @@ class App:
         except Exception:
             pass
 
-        self.msg_queue.put(LogMsg("Installing Godot 4 headless for asset reimport...", "info"))
+        self.msg_queue.put(LogMsg(
+            f"Installing Godot {GODOT_VERSION} headless for asset reimport...", "info"))
 
-        godot_ver = "4.4.1"
-        if platform == "darwin":
-            # TODO: macOS Godot headless download
-            self.msg_queue.put(LogMsg(
-                "Godot headless auto-install not yet supported on macOS.", "error"))
-            return
-
-        # Linux / WSL
-        url = (f"https://github.com/godotengine/godot/releases/download/"
-               f"{godot_ver}-stable/Godot_v{godot_ver}-stable_linux.x86_64.zip")
         try:
-            for line in self.executor.stream(
-                f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
-                timeout=300,
-            ):
-                if line.strip():
-                    self.msg_queue.put(LogMsg(f"  {line}", "info"))
+            if platform == "darwin":
+                url = (f"https://github.com/godotengine/godot/releases/download/"
+                       f"{GODOT_VERSION}-stable/"
+                       f"Godot_v{GODOT_VERSION}-stable_macos.universal.zip")
+                for line in self.executor.stream(
+                    f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
+                    timeout=300,
+                ):
+                    if line.strip():
+                        self.msg_queue.put(LogMsg(f"  {line}", "info"))
+                self.executor.run(
+                    "unzip -o /tmp/godot.zip -d /tmp/godot_extract && "
+                    "sudo cp '/tmp/godot_extract/Godot.app/Contents/MacOS/Godot' "
+                    f"  {GODOT_HEADLESS_PATH} && "
+                    f"sudo chmod +x {GODOT_HEADLESS_PATH} && "
+                    "rm -rf /tmp/godot.zip /tmp/godot_extract",
+                    timeout=60,
+                )
+            else:
+                # Linux / WSL
+                url = (f"https://github.com/godotengine/godot/releases/download/"
+                       f"{GODOT_VERSION}-stable/"
+                       f"Godot_v{GODOT_VERSION}-stable_linux.x86_64.zip")
+                for line in self.executor.stream(
+                    f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
+                    timeout=300,
+                ):
+                    if line.strip():
+                        self.msg_queue.put(LogMsg(f"  {line}", "info"))
+                self.executor.run(
+                    f"unzip -o /tmp/godot.zip -d /opt/ && "
+                    f"chmod +x {GODOT_HEADLESS_PATH} && "
+                    f"rm -f /tmp/godot.zip",
+                    timeout=60,
+                )
 
-            self.executor.run(
-                f"unzip -o /tmp/godot.zip -d /opt/ && "
-                f"chmod +x /opt/Godot_v{godot_ver}-stable_linux.x86_64 && "
-                f"rm -f /tmp/godot.zip",
-                timeout=60,
-            )
             self.msg_queue.put(LogMsg(
-                f"Godot {godot_ver} headless installed.", "success"))
+                f"Godot {GODOT_VERSION} headless installed.", "success"))
         except Exception as e:
             self.msg_queue.put(LogMsg(
                 f"Godot headless installation failed: {e}", "error"))

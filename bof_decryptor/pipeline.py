@@ -18,7 +18,11 @@ from .config import (
 from .executor import CommandError
 
 CHECKSUMS_FILE = ".checksums.md5"
-GODOT_HEADLESS_PATH = "/opt/Godot_v4.4.1-stable_linux.x86_64"
+GODOT_VERSION = "4.4.1"
+if sys.platform == "darwin":
+    GODOT_HEADLESS_PATH = f"/usr/local/bin/godot"
+else:
+    GODOT_HEADLESS_PATH = f"/opt/Godot_v{GODOT_VERSION}-stable_linux.x86_64"
 
 
 def _parse_import_remap(import_file_path):
@@ -136,7 +140,7 @@ class _BasePipeline:
     def _godot_headless_prefix(self):
         """Return the shell prefix to invoke Godot 4 headlessly."""
         if sys.platform == "darwin":
-            return "GODOT_SILENCE_ROOT_WARNING=1 godot --headless "
+            return f"GODOT_SILENCE_ROOT_WARNING=1 {GODOT_HEADLESS_PATH} --headless "
         return (
             "DISPLAY= WAYLAND_DISPLAY= "
             "GODOT_SILENCE_ROOT_WARNING=1 "
