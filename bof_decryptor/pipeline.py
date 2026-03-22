@@ -18,6 +18,28 @@ from .config import (
 from .executor import CommandError
 
 CHECKSUMS_FILE = ".checksums.md5"
+GODOT_HEADLESS_PATH = "/opt/Godot_v4.4.1-stable_linux.x86_64"
+
+
+def _parse_import_remap(import_file_path):
+    """Parse a Godot .import file and return the dest path (relative to pck root).
+
+    Returns None if the file doesn't exist or has no remap path.
+    """
+    if not os.path.isfile(import_file_path):
+        return None
+    try:
+        with open(import_file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("path="):
+                    path = line.split("=", 1)[1].strip('"').strip("'")
+                    if path.startswith("res://"):
+                        path = path[len("res://"):]
+                    return path
+    except Exception:
+        pass
+    return None
 
 class _nullctx:
     """No-op context manager."""
@@ -111,6 +133,16 @@ class _BasePipeline:
             pass
         return "gpg"  # last resort
 
+    def _godot_headless_prefix(self):
+        """Return the shell prefix to invoke Godot 4 headlessly."""
+        if sys.platform == "darwin":
+            return "GODOT_SILENCE_ROOT_WARNING=1 godot --headless "
+        return (
+            "DISPLAY= WAYLAND_DISPLAY= "
+            "GODOT_SILENCE_ROOT_WARNING=1 "
+            f"xvfb-run -a {GODOT_HEADLESS_PATH} --headless "
+        )
+
     def _gdre_prefix(self):
         """Return the shell prefix to invoke GDRE Tools headlessly."""
         if sys.platform == "darwin":
@@ -202,6 +234,22 @@ def check_prerequisites(executor):
             results.append(("gdre_tools", True, path.strip()))
     except Exception:
         results.append(("gdre_tools", False,
+                        "Optional — click Install Missing to download automatically"))
+
+    # godot (for audio reimport during Write)
+    try:
+        executor.run(f"test -x {GODOT_HEADLESS_PATH}", timeout=5)
+        results.append(("godot", True, GODOT_HEADLESS_PATH))
+    except Exception:
+        results.append(("godot", False,
+                        "Optional — click Install Missing to download automatically"))
+
+    # cwebp (for texture reimport during Write)
+    try:
+        executor.run("cwebp -version > /dev/null 2>&1", timeout=5)
+        results.append(("cwebp", True, "available"))
+    except Exception:
+        results.append(("cwebp", False,
                         "Optional — click Install Missing to download automatically"))
 
     return results
@@ -578,6 +626,188 @@ class ModifyPipeline(_BasePipeline):
         self.game_key = game_key
         self.executor = executor
 
+    # ------------------------------------------------------------------
+    # Asset reimport helpers
+    # ------------------------------------------------------------------
+
+    def _reimport_assets(self, changed_pck, pck_dir, pck_dir_wsl):
+        """For changed source files with .import sidecars, regenerate the
+        imported version and return additional relative paths to patch."""
+        _IMPORTABLE = (".wav", ".ogg", ".png", ".jpg", ".jpeg")
+        audio_jobs = []    # (rel_source, dest_rel, ext)
+        texture_jobs = []  # (rel_source, dest_rel)
+
+        for rel in changed_pck:
+            lower = rel.lower()
+            if not any(lower.endswith(ext) for ext in _IMPORTABLE):
+                continue
+            import_file = os.path.join(pck_dir, rel + ".import")
+            dest_rel = _parse_import_remap(import_file)
+            if not dest_rel:
+                continue
+            # Verify original imported file exists (we need its header for textures)
+            dest_abs = os.path.join(pck_dir, dest_rel)
+            if not os.path.isfile(dest_abs):
+                self._log(f"  Warning: imported file missing: {dest_rel}", "error")
+                continue
+            if lower.endswith((".wav", ".ogg")):
+                audio_jobs.append((rel, dest_rel, "wav" if lower.endswith(".wav") else "ogg"))
+            else:
+                texture_jobs.append((rel, dest_rel))
+
+        extra = []
+        if audio_jobs:
+            self._reimport_audio(audio_jobs, pck_dir, pck_dir_wsl)
+            extra.extend(d for _, d, _ in audio_jobs)
+        if texture_jobs:
+            self._reimport_textures(texture_jobs, pck_dir, pck_dir_wsl)
+            extra.extend(d for _, d in texture_jobs)
+        return extra
+
+    def _reimport_audio(self, jobs, pck_dir, pck_dir_wsl):
+        """Convert wav/ogg source files to Godot .sample/.oggvorbisstr using
+        Godot 4 headless."""
+        import base64 as _b64
+
+        gdscript = r'''extends SceneTree
+
+func _init():
+    var args = OS.get_cmdline_user_args()
+    var i = 0
+    while i + 1 < args.size():
+        var src = args[i]
+        var dst = args[i + 1]
+        if src.ends_with(".ogg"):
+            _convert_ogg(src, dst)
+        elif src.ends_with(".wav"):
+            _convert_wav(src, dst)
+        i += 2
+    quit()
+
+func _convert_ogg(src: String, dst: String):
+    var stream = AudioStreamOggVorbis.load_from_file(src)
+    if stream == null:
+        printerr("Cannot load OGG: ", src)
+        return
+    var err = ResourceSaver.save(stream, dst)
+    print("OK " + dst if err == OK else "FAIL " + dst)
+
+func _convert_wav(src: String, dst: String):
+    var file = FileAccess.open(src, FileAccess.READ)
+    if not file:
+        printerr("Cannot open WAV: ", src)
+        return
+    var buf = file.get_buffer(file.get_length())
+    file.close()
+    var channels = buf.decode_u16(22)
+    var sample_rate = buf.decode_u32(24)
+    var bits = buf.decode_u16(34)
+    # Find data chunk
+    var pos = 12
+    var data_start = -1
+    var data_size = 0
+    while pos < buf.size() - 8:
+        var cid = buf.slice(pos, pos + 4).get_string_from_ascii()
+        var csz = buf.decode_u32(pos + 4)
+        if cid == "data":
+            data_start = pos + 8
+            data_size = csz
+            break
+        pos += 8 + csz
+        if csz % 2 == 1:
+            pos += 1
+    if data_start < 0:
+        printerr("No data chunk in WAV: ", src)
+        return
+    var stream = AudioStreamWAV.new()
+    stream.format = AudioStreamWAV.FORMAT_16_BITS if bits == 16 else AudioStreamWAV.FORMAT_8_BITS
+    stream.mix_rate = sample_rate
+    stream.stereo = (channels == 2)
+    stream.data = buf.slice(data_start, data_start + data_size)
+    var err = ResourceSaver.save(stream, dst)
+    print("OK " + dst if err == OK else "FAIL " + dst)
+'''
+        script_path = "/tmp/bof_convert.gd"
+        b64 = _b64.b64encode(gdscript.encode()).decode()
+        self.executor.run(
+            f"echo {b64!r} | base64 -d > {script_path}",
+            timeout=10,
+        )
+
+        # Build args: src1 dst1 src2 dst2 ...
+        args_parts = []
+        for rel_src, dest_rel, _ in jobs:
+            src_wsl = f"{pck_dir_wsl}/{rel_src}"
+            # Write the reimported file directly into the user's pck dir
+            dst_wsl = f"{pck_dir_wsl}/{dest_rel}"
+            args_parts.append(f"'{src_wsl}' '{dst_wsl}'")
+
+        godot = self._godot_headless_prefix()
+        cmd = (
+            f"{godot} --script {script_path} -- "
+            f"{' '.join(args_parts)} 2>&1"
+        )
+        self._log(f"  Reimporting {len(jobs)} audio file(s) via Godot...", "info")
+        try:
+            for line in self.executor.stream(cmd, timeout=300):
+                line = line.strip()
+                if line.startswith("OK ") or line.startswith("FAIL "):
+                    self._log(f"    {line}", "info" if line.startswith("OK") else "error")
+        except CommandError as e:
+            self._log(f"  Audio reimport warning: {e.output}", "error")
+
+    def _reimport_textures(self, jobs, pck_dir, pck_dir_wsl):
+        """Convert png/jpg source files to Godot .ctex using cwebp + GST2 header."""
+        import base64 as _b64
+        import struct as _struct
+
+        self._log(f"  Reimporting {len(jobs)} texture(s)...", "info")
+        for rel_src, dest_rel in jobs:
+            dest_abs = os.path.join(pck_dir, dest_rel)
+
+            # Read original ctex header (everything before the RIFF/WebP data)
+            try:
+                with open(dest_abs, "rb") as f:
+                    orig_data = f.read()
+                riff_offset = orig_data.find(b"RIFF")
+                if riff_offset < 0:
+                    self._log(f"    Skipping {rel_src}: ctex not WebP-based", "error")
+                    continue
+                header = bytearray(orig_data[:riff_offset])
+            except Exception as e:
+                self._log(f"    Skipping {rel_src}: {e}", "error")
+                continue
+
+            # Convert source image to WebP lossless, get size, assemble ctex
+            src_wsl = f"{pck_dir_wsl}/{rel_src}"
+            dest_wsl = self.executor.to_exec_path(dest_abs)
+            tmp_webp = "/tmp/bof_tex.webp"
+            header_b64 = _b64.b64encode(bytes(header)).decode()
+
+            try:
+                # cwebp convert + assemble in one shot
+                self.executor.run(
+                    f"cwebp -lossless -quiet '{src_wsl}' -o {tmp_webp} 2>&1",
+                    timeout=60,
+                )
+                # Get WebP size and update the length field in the header
+                webp_size = int(self.executor.run(
+                    f"stat -f%z {tmp_webp} 2>/dev/null || stat -c%s {tmp_webp}",
+                    timeout=5,
+                ).strip())
+                _struct.pack_into("<I", header, len(header) - 4, webp_size)
+                header_b64 = _b64.b64encode(bytes(header)).decode()
+
+                # Write header + WebP data to the imported ctex file
+                self.executor.run(
+                    f"echo {header_b64!r} | base64 -d > '{dest_wsl}' && "
+                    f"cat {tmp_webp} >> '{dest_wsl}'",
+                    timeout=30,
+                )
+                self._log(f"    OK {dest_rel}", "info")
+            except CommandError as e:
+                self._log(f"    Failed {rel_src}: {e.output}", "error")
+
     def run(self):
         try:
             self._run()
@@ -673,11 +903,22 @@ class ModifyPipeline(_BasePipeline):
                         changed_pck.append(rel)
 
         if changed_pck:
-            self._log(f"Found {len(changed_pck)} modified PCK file(s):", "info")
+            self._log(f"Found {len(changed_pck)} modified source file(s):", "info")
             for f in changed_pck[:20]:
                 self._log(f"  {f}", "info")
             if len(changed_pck) > 20:
                 self._log(f"  ... and {len(changed_pck) - 20} more", "info")
+
+            # Reimport: for files with .import sidecars, regenerate the
+            # imported version (.sample, .oggvorbisstr, .ctex) so Godot
+            # picks up the change at runtime.
+            pck_dir_wsl = self.executor.to_exec_path(pck_dir)
+            self._log("Reimporting assets for Godot...", "info")
+            self._progress(0, 0, "Reimporting assets...")
+            extra = self._reimport_assets(changed_pck, pck_dir, pck_dir_wsl)
+            if extra:
+                self._log(f"Reimported {len(extra)} imported asset(s)", "success")
+                changed_pck.extend(extra)
 
             self._log(f"Patching {len(changed_pck)} file(s) into binary...", "info")
             self._progress(0, 100, "Patching PCK...")
@@ -821,7 +1062,8 @@ class ModifyPipeline(_BasePipeline):
         try:
             self.executor.run(
                 f"rm -rf {tmp_tar_wsl!r} {tmp_dir_wsl!r} {repack_tar_wsl!r} "
-                f"/tmp/bof_{game_key}_patch.sh 2>/dev/null; true",
+                f"/tmp/bof_{game_key}_patch.sh /tmp/bof_convert.gd "
+                f"/tmp/bof_tex.webp 2>/dev/null; true",
                 timeout=30,
             )
         except Exception:

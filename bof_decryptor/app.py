@@ -188,7 +188,7 @@ class App:
             # Install base packages
             if platform == "win32":
                 pkg_cmd = ("apt-get update -qq && "
-                           "apt-get install -y gnupg tar curl unzip xvfb 2>&1")
+                           "apt-get install -y gnupg tar curl unzip xvfb webp 2>&1")
             elif platform == "darwin":
                 # Check if Homebrew is installed; if not, install it first
                 try:
@@ -207,10 +207,10 @@ class App:
                         self.msg_queue.put(LogMsg(f"Homebrew install failed: {e}", "error"))
                         self.msg_queue.put(LogMsg(
                             "Install Homebrew manually: https://brew.sh", "error"))
-                pkg_cmd = "brew install gnupg curl unzip 2>&1"
+                pkg_cmd = "brew install gnupg curl unzip webp 2>&1"
             else:
                 pkg_cmd = ("sudo apt-get update -qq && "
-                           "sudo apt-get install -y gnupg tar curl unzip xvfb 2>&1")
+                           "sudo apt-get install -y gnupg tar curl unzip xvfb webp 2>&1")
 
             try:
                 for line in self.executor.stream(pkg_cmd, timeout=300):
@@ -221,6 +221,9 @@ class App:
 
             # GDRE Tools
             self._install_gdre_tools()
+
+            # Godot headless (for asset reimport)
+            self._install_godot_headless()
 
             results = check_prerequisites(self.executor)
             for name, passed, message in results:
@@ -347,6 +350,53 @@ class App:
         except Exception as e:
             self.msg_queue.put(LogMsg(
                 f"GDRE Tools installation failed: {e}", "error"))
+
+    def _install_godot_headless(self):
+        """Download and install Godot 4 headless binary for asset reimport."""
+        import sys as _sys
+        from .pipeline import GODOT_HEADLESS_PATH
+
+        platform = _sys.platform
+
+        # Check if already installed
+        try:
+            self.executor.run(f"test -x {GODOT_HEADLESS_PATH}", timeout=5)
+            self.msg_queue.put(LogMsg("Godot headless already installed.", "info"))
+            return
+        except Exception:
+            pass
+
+        self.msg_queue.put(LogMsg("Installing Godot 4 headless for asset reimport...", "info"))
+
+        godot_ver = "4.4.1"
+        if platform == "darwin":
+            # TODO: macOS Godot headless download
+            self.msg_queue.put(LogMsg(
+                "Godot headless auto-install not yet supported on macOS.", "error"))
+            return
+
+        # Linux / WSL
+        url = (f"https://github.com/godotengine/godot/releases/download/"
+               f"{godot_ver}-stable/Godot_v{godot_ver}-stable_linux.x86_64.zip")
+        try:
+            for line in self.executor.stream(
+                f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
+                timeout=300,
+            ):
+                if line.strip():
+                    self.msg_queue.put(LogMsg(f"  {line}", "info"))
+
+            self.executor.run(
+                f"unzip -o /tmp/godot.zip -d /opt/ && "
+                f"chmod +x /opt/Godot_v{godot_ver}-stable_linux.x86_64 && "
+                f"rm -f /tmp/godot.zip",
+                timeout=60,
+            )
+            self.msg_queue.put(LogMsg(
+                f"Godot {godot_ver} headless installed.", "success"))
+        except Exception as e:
+            self.msg_queue.put(LogMsg(
+                f"Godot headless installation failed: {e}", "error"))
 
     # ------------------------------------------------------------------
     # Decrypt
