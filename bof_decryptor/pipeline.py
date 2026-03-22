@@ -946,7 +946,7 @@ func _convert_wav(src: String, dst: String):
                 local_path = f"{pck_dir_wsl}/{rel}"
                 cont = " \\" if i < len(changed_pck) - 1 else ""
                 script_lines.append(
-                    f"  '--patch-file={local_path}=res://{rel}'{cont}"
+                    f"  --patch-file='{local_path}=res://{rel}'{cont}"
                 )
             script_b64 = _b64.b64encode(
                 ("\n".join(script_lines) + "\n").encode()
