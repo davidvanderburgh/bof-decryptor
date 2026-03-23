@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -140,9 +141,10 @@ class _BasePipeline:
     def _godot_headless_prefix(self):
         """Return the shell prefix to invoke Godot 4 headlessly."""
         if sys.platform == "darwin":
-            # Clear quarantine in case it wasn't cleared during install
+            # Clear quarantine and ad-hoc sign in case it wasn't done during install
             return (
                 f"xattr -cr '{GODOT_HEADLESS_PATH}' 2>/dev/null; "
+                f"codesign --force --sign - '{GODOT_HEADLESS_PATH}' 2>/dev/null; "
                 f"GODOT_SILENCE_ROOT_WARNING=1 '{GODOT_HEADLESS_PATH}' --headless "
             )
         return (
@@ -672,109 +674,127 @@ class ModifyPipeline(_BasePipeline):
             extra.extend(d for _, d in texture_jobs)
         return extra
 
-    def _reimport_audio(self, jobs, pck_dir, pck_dir_wsl):
-        """Convert wav/ogg source files to Godot .sample/.oggvorbisstr using
-        Godot 4 headless."""
+    @staticmethod
+    def _wav_to_sample(wav_path, sample_path):
+        """Convert WAV to Godot AudioStreamWAV .sample (RSRC binary format).
+
+        Pure Python — no Godot binary needed.  Produces byte-identical output
+        to Godot 4.4's ResourceSaver for uncompressed 8/16-bit PCM WAV files.
+        """
+        import wave as _wave
+
+        with _wave.open(wav_path, "rb") as w:
+            channels = w.getnchannels()
+            sample_rate = w.getframerate()
+            sample_width = w.getsampwidth()
+            pcm = w.readframes(w.getnframes())
+
+        godot_fmt = 1 if sample_width == 2 else 0  # 0=8bit, 1=16bit
+        stereo = 1 if channels == 2 else 0
+
+        # --- RSRC header (334 bytes) ---
+        # Reverse-engineered from Godot 4.4.1 ResourceSaver output.
+        # This is the fixed preamble for every AudioStreamWAV resource.
+        # Exact 334-byte RSRC header for AudioStreamWAV, extracted from
+        # Godot 4.4.1 ResourceSaver output.  Everything before the PCM
+        # data length field.
         import base64 as _b64
+        _HEADER = _b64.b64decode(
+            "UlNSQwAAAAAAAAAABAAAAAQAAAAGAAAADwAAAEF1ZGlvU3RyZWFtV0FWAAAA"
+            "AAAAAAAAAwAAAP//////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAKAAAAGAAAAHJlc291cmNlX2xvY2FsX3RvX3Nj"
+            "ZW5lAA4AAAByZXNvdXJjZV9uYW1lAAUAAABkYXRhAAcAAABmb3JtYXQACgAA"
+            "AGxvb3BfbW9kZQALAAAAbG9vcF9iZWdpbgAJAAAAbG9vcF9lbmQACQAAAG1p"
+            "eF9yYXRlAAcAAABzdGVyZW8ABwAAAHNjcmlwdAAAAAAAAQAAAB0AAABsb2Nh"
+            "bDovL0F1ZGlvU3RyZWFtV0FWX2JnaThmAC8BAAAAAAAADwAAAEF1ZGlvU3Ry"
+            "ZWFtV0FWAAUAAAACAAAAHwAAAA=="
+        )
 
-        gdscript = r'''extends SceneTree
+        # --- Trailer (48 bytes): properties after PCM data ---
+        # format(int) + mix_rate(int) + stereo(bool) + script(nil) + sentinel
+        trailer = bytearray(48)
+        struct.pack_into("<III", trailer, 0, 3, 3, godot_fmt)     # format
+        struct.pack_into("<III", trailer, 12, 7, 3, sample_rate)  # mix_rate
+        struct.pack_into("<III", trailer, 24, 8, 2, stereo)       # stereo
+        # script(nil) + RSRC sentinel
+        struct.pack_into("<II", trailer, 36, 9, 1)
+        trailer[44:48] = b"RSRC"
 
+        header = _HEADER
+        with open(sample_path, "wb") as f:
+            f.write(header)
+            f.write(struct.pack("<I", len(pcm)))
+            f.write(pcm)
+            f.write(trailer)
+
+    def _reimport_audio(self, jobs, pck_dir, pck_dir_wsl):
+        """Convert wav/ogg source files to Godot imported formats.
+
+        WAV → .sample: pure Python (no external dependencies).
+        OGG → .oggvorbisstr: requires Godot headless.
+        """
+        wav_jobs = [(s, d, e) for s, d, e in jobs if e == "wav"]
+        ogg_jobs = [(s, d, e) for s, d, e in jobs if e == "ogg"]
+
+        # --- WAV conversion (pure Python) ---
+        if wav_jobs:
+            self._log(f"  Converting {len(wav_jobs)} WAV file(s) to .sample...", "info")
+            for rel_src, dest_rel, _ in wav_jobs:
+                src_abs = os.path.join(pck_dir, rel_src)
+                dest_abs = os.path.join(pck_dir, dest_rel)
+                try:
+                    self._wav_to_sample(src_abs, dest_abs)
+                    self._log(f"    OK {dest_rel}", "success")
+                except Exception as e:
+                    self._log(f"    FAIL {rel_src}: {e}", "error")
+
+        # --- OGG conversion (needs Godot headless) ---
+        if ogg_jobs:
+            import base64 as _b64
+            gdscript = r'''extends SceneTree
 func _init():
     var args = OS.get_cmdline_user_args()
     var i = 0
     while i + 1 < args.size():
-        var src = args[i]
-        var dst = args[i + 1]
-        if src.ends_with(".ogg"):
-            _convert_ogg(src, dst)
-        elif src.ends_with(".wav"):
-            _convert_wav(src, dst)
+        var stream = AudioStreamOggVorbis.load_from_file(args[i])
+        if stream:
+            var err = ResourceSaver.save(stream, args[i + 1])
+            print("OK " + args[i + 1] if err == OK else "FAIL " + args[i + 1])
+        else:
+            printerr("Cannot load: " + args[i])
         i += 2
     quit()
-
-func _convert_ogg(src: String, dst: String):
-    var stream = AudioStreamOggVorbis.load_from_file(src)
-    if stream == null:
-        printerr("Cannot load OGG: ", src)
-        return
-    var err = ResourceSaver.save(stream, dst)
-    print("OK " + dst if err == OK else "FAIL " + dst)
-
-func _convert_wav(src: String, dst: String):
-    var file = FileAccess.open(src, FileAccess.READ)
-    if not file:
-        printerr("Cannot open WAV: ", src)
-        return
-    var buf = file.get_buffer(file.get_length())
-    file.close()
-    var channels = buf.decode_u16(22)
-    var sample_rate = buf.decode_u32(24)
-    var bits = buf.decode_u16(34)
-    # Find data chunk
-    var pos = 12
-    var data_start = -1
-    var data_size = 0
-    while pos < buf.size() - 8:
-        var cid = buf.slice(pos, pos + 4).get_string_from_ascii()
-        var csz = buf.decode_u32(pos + 4)
-        if cid == "data":
-            data_start = pos + 8
-            data_size = csz
-            break
-        pos += 8 + csz
-        if csz % 2 == 1:
-            pos += 1
-    if data_start < 0:
-        printerr("No data chunk in WAV: ", src)
-        return
-    var stream = AudioStreamWAV.new()
-    stream.format = AudioStreamWAV.FORMAT_16_BITS if bits == 16 else AudioStreamWAV.FORMAT_8_BITS
-    stream.mix_rate = sample_rate
-    stream.stereo = (channels == 2)
-    stream.data = buf.slice(data_start, data_start + data_size)
-    var err = ResourceSaver.save(stream, dst)
-    print("OK " + dst if err == OK else "FAIL " + dst)
 '''
-        script_path = "/tmp/bof_convert.gd"
-        b64 = _b64.b64encode(gdscript.encode()).decode()
-        self.executor.run(
-            f"echo {b64!r} | base64 -d > {script_path}",
-            timeout=10,
-        )
+            script_path = "/tmp/bof_convert_ogg.gd"
+            b64 = _b64.b64encode(gdscript.encode()).decode()
+            self.executor.run(
+                f"echo {b64!r} | base64 -d > {script_path}", timeout=10)
 
-        # Build args: src1 dst1 src2 dst2 ...
-        args_parts = []
-        for rel_src, dest_rel, _ in jobs:
-            src_wsl = f"{pck_dir_wsl}/{rel_src}"
-            # Write the reimported file directly into the user's pck dir
-            dst_wsl = f"{pck_dir_wsl}/{dest_rel}"
-            args_parts.append(f"'{src_wsl}' '{dst_wsl}'")
+            args_parts = []
+            for rel_src, dest_rel, _ in ogg_jobs:
+                args_parts.append(
+                    f"'{pck_dir_wsl}/{rel_src}' '{pck_dir_wsl}/{dest_rel}'")
 
-        godot = self._godot_headless_prefix()
-        self._log(f"  Reimporting {len(jobs)} audio file(s) via Godot...", "info")
-        self._log(f"    Using: {GODOT_HEADLESS_PATH}", "info")
-        cmd = (
-            f"{godot} --script {script_path} -- "
-            f"{' '.join(args_parts)} 2>&1"
-        )
-        try:
-            output = self.executor.run(cmd, timeout=300)
-            for line in output.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("OK "):
-                    self._log(f"    {line}", "success")
-                else:
-                    self._log(f"    {line}", "info")
-        except CommandError as e:
-            self._log(f"  Audio reimport failed (exit {e.returncode}):", "error")
-            for line in (e.output or "").splitlines():
-                line = line.strip()
-                if line:
-                    self._log(f"    {line}", "error")
+            godot = self._godot_headless_prefix()
+            self._log(f"  Converting {len(ogg_jobs)} OGG file(s) via Godot...", "info")
+            try:
+                output = self.executor.run(
+                    f"{godot} --script {script_path} -- "
+                    f"{' '.join(args_parts)} 2>&1",
+                    timeout=300,
+                )
+                for line in output.splitlines():
+                    line = line.strip()
+                    if line:
+                        self._log(f"    {line}",
+                                  "success" if line.startswith("OK") else "info")
+            except CommandError as e:
+                self._log(f"  OGG reimport failed (exit {e.returncode}):", "error")
+                for line in (e.output or "").splitlines():
+                    if line.strip():
+                        self._log(f"    {line.strip()}", "error")
 
-        # Verify each converted file was actually written
+        # Verify all converted files were actually written
         failed = set()
         for rel_src, dest_rel, ext in jobs:
             dest_abs = os.path.join(pck_dir, dest_rel)
@@ -783,7 +803,6 @@ func _convert_wav(src: String, dst: String):
             if not os.path.isfile(dest_abs) or os.path.getmtime(dest_abs) < src_mtime:
                 self._log(f"    WARNING: reimport failed for {rel_src}", "error")
                 failed.add(dest_rel)
-        # Remove failed entries so they don't get patched with stale data
         jobs[:] = [(s, d, e) for s, d, e in jobs if d not in failed]
 
     def _reimport_textures(self, jobs, pck_dir, pck_dir_wsl):

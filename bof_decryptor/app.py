@@ -392,6 +392,7 @@ class App:
                     f"  '{GODOT_HEADLESS_PATH}' && "
                     f"chmod +x '{GODOT_HEADLESS_PATH}' && "
                     f"xattr -cr '{GODOT_HEADLESS_PATH}' && "
+                    f"codesign --force --deep --sign - '{GODOT_HEADLESS_PATH}' && "
                     "rm -rf /tmp/godot.zip /tmp/godot_extract",
                     timeout=60,
                 )

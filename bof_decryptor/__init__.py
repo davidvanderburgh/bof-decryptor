@@ -1,3 +1,3 @@
 """BOF Asset Decryptor — decrypt and explore Barrels of Fun pinball game assets."""
 
-__version__ = "1.4.5"
+__version__ = "1.5.0"
