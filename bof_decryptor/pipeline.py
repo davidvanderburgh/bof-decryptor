@@ -727,11 +727,176 @@ class ModifyPipeline(_BasePipeline):
             f.write(pcm)
             f.write(trailer)
 
+    @staticmethod
+    def _ogg_to_oggvorbisstr(ogg_path, output_path):
+        """Convert OGG Vorbis to Godot 4 AudioStreamOggVorbis .oggvorbisstr.
+
+        Pure Python — no Godot binary needed.  Builds a valid RSRC binary
+        resource containing an OggPacketSequence sub-resource (with the
+        raw vorbis packets, granule positions and sample rate) and an
+        AudioStreamOggVorbis sub-resource that references it.
+        """
+        import base64 as _b64
+
+        ogg_data = open(ogg_path, "rb").read()
+
+        # ── Parse OGG pages ─────────────────────────────────────────
+        pages = []          # list of (granule, [packet_bytes, ...])
+        pos = 0
+        carry = b""         # partial packet carried from previous page
+        while pos + 27 <= len(ogg_data):
+            if ogg_data[pos:pos + 4] != b"OggS":
+                break
+            header_type = ogg_data[pos + 5]
+            continued = bool(header_type & 0x01)
+            granule = struct.unpack_from("<q", ogg_data, pos + 6)[0]
+            num_segments = ogg_data[pos + 26]
+            seg_table = ogg_data[pos + 27:pos + 27 + num_segments]
+            data_start = pos + 27 + num_segments
+            total_data = sum(seg_table)
+
+            packets = []
+            buf = carry if continued else b""
+            if continued and not carry:
+                buf = b""  # discard if we have nothing to continue
+            elif not continued and carry:
+                # Previous page ended mid-packet but this page doesn't
+                # continue — discard the partial data (shouldn't happen
+                # in well-formed files).
+                carry = b""
+
+            seg_offset = data_start
+            for seg_size in seg_table:
+                buf += ogg_data[seg_offset:seg_offset + seg_size]
+                seg_offset += seg_size
+                if seg_size < 255:
+                    packets.append(buf)
+                    buf = b""
+
+            carry = buf  # non-empty if last segment was 255
+            pages.append((granule, packets))
+            pos = data_start + total_data
+
+        if not pages:
+            raise ValueError("No OGG pages found in " + ogg_path)
+
+        # ── Extract sample rate from Vorbis identification header ───
+        first_pkt = pages[0][1][0] if pages[0][1] else b""
+        if len(first_pkt) < 16 or first_pkt[1:7] != b"vorbis":
+            raise ValueError("First OGG packet is not a Vorbis ID header")
+        sample_rate = struct.unpack_from("<I", first_pkt, 12)[0]
+
+        # ── Helper: pad length for binary variant encoding ──────────
+        def _pad(n):
+            """Bytes needed to pad *n* data bytes to a 4-byte boundary."""
+            extra = 4 - (n % 4)
+            return extra if extra < 4 else 0
+
+        # ── Build packet_data variant (Array[Array[PackedByteArray]])
+        VTYPE_ARRAY = 0x1E
+        VTYPE_PBA = 0x1F
+
+        pkt_buf = bytearray()
+        pkt_buf += struct.pack("<I", len(pages))        # outer array count
+        for _granule, pkts in pages:
+            pkt_buf += struct.pack("<II", VTYPE_ARRAY, len(pkts))
+            for p in pkts:
+                pkt_buf += struct.pack("<II", VTYPE_PBA, len(p))
+                pkt_buf += p
+                pkt_buf += b"\x00" * _pad(len(p))
+
+        # ── Build granule_positions variant (PackedInt64Array) ──────
+        VTYPE_PACKED_INT64 = 0x30
+        gran_buf = bytearray()
+        gran_buf += struct.pack("<I", len(pages))
+        for g, _pkts in pages:
+            gran_buf += struct.pack("<q", g)
+
+        # ── Build OggPacketSequence sub-resource ────────────────────
+        oggpkt_type = b"OggPacketSequence\x00"  # 18 bytes
+        oggpkt_nprops = 4  # packet_data, granule_positions, sampling_rate, script
+
+        oggpkt = bytearray()
+        oggpkt += struct.pack("<I", len(oggpkt_type))
+        oggpkt += oggpkt_type
+        oggpkt += struct.pack("<I", oggpkt_nprops)
+        # prop 0: packet_data (string index 2), Array
+        oggpkt += struct.pack("<II", 2, VTYPE_ARRAY)
+        oggpkt += pkt_buf
+        # prop 1: granule_positions (string index 3), PackedInt64Array
+        oggpkt += struct.pack("<II", 3, VTYPE_PACKED_INT64)
+        oggpkt += gran_buf
+        # prop 2: sampling_rate (string index 4), float
+        oggpkt += struct.pack("<IIf", 4, 4, float(sample_rate))
+        # prop 3: script (string index 5), nil
+        oggpkt += struct.pack("<II", 5, 1)
+
+        # ── Build AudioStreamOggVorbis sub-resource ─────────────────
+        asov_type = b"AudioStreamOggVorbis\x00"  # 21 bytes
+        asov = bytearray()
+        asov += struct.pack("<I", len(asov_type))
+        asov += asov_type
+        asov += struct.pack("<I", 2)                # num_props = 2
+        # prop 0: packet_sequence (idx 6), Object internal ref, index 0
+        asov += struct.pack("<IIII", 6, 0x18, 2, 0)
+        # prop 1: script (idx 5), nil
+        asov += struct.pack("<II", 5, 1)
+        # RSRC sentinel
+        asov += b"RSRC"
+
+        # ── Build RSRC header ───────────────────────────────────────
+        # Pre-string-table preamble (always the same for OGG resources).
+        _PRE = _b64.b64decode(
+            "UlNSQwAAAAAAAAAABAAAAAQAAAAGAAAAFQAAAEF1ZGlvU3Ry"
+            "ZWFtT2dnVm9yYmlzAAAAAAAAAAAAAwAAAP//////////AAAA"
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        )
+        # String table (12 entries, always the same property names).
+        _STRINGS = _b64.b64decode(
+            "DAAAABgAAAByZXNvdXJjZV9sb2NhbF90b19zY2VuZQAOAAAA"
+            "cmVzb3VyY2VfbmFtZQAMAAAAcGFja2V0X2RhdGEAEgAAAGdy"
+            "YW51bGVfcG9zaXRpb25zAA4AAABzYW1wbGluZ19yYXRlAAcA"
+            "AABzY3JpcHQAEAAAAHBhY2tldF9zZXF1ZW5jZQAEAAAAYnBt"
+            "AAsAAABiZWF0X2NvdW50AAoAAABiYXJfYmVhdHMABQAAAGxv"
+            "b3AADAAAAGxvb3Bfb2Zmc2V0AA=="
+        )
+
+        # Internal resource paths (use short fixed names)
+        int_path_0 = b"local://OggPacketSequence_1\x00"  # 27 bytes
+        int_path_1 = b"local://AudioStreamOggVorbis_1\x00"  # 31 bytes
+
+        # Compute internal resource offsets
+        res_table = bytearray()
+        res_table += struct.pack("<I", 0)  # external resource count
+        res_table += struct.pack("<I", 2)  # internal resource count
+        # Entry 0: OggPacketSequence
+        header_size_before_res0 = (
+            len(_PRE) + len(_STRINGS) + 4 + 4  # ext_count + int_count
+            + 4 + len(int_path_0) + 8           # entry 0
+            + 4 + len(int_path_1) + 8           # entry 1
+        )
+        res0_offset = header_size_before_res0
+        res1_offset = res0_offset + len(oggpkt)
+        res_table += struct.pack("<I", len(int_path_0))
+        res_table += int_path_0
+        res_table += struct.pack("<Q", res0_offset)
+        res_table += struct.pack("<I", len(int_path_1))
+        res_table += int_path_1
+        res_table += struct.pack("<Q", res1_offset)
+
+        # ── Write output ────────────────────────────────────────────
+        with open(output_path, "wb") as f:
+            f.write(_PRE)
+            f.write(_STRINGS)
+            f.write(res_table)
+            f.write(oggpkt)
+            f.write(asov)
+
     def _reimport_audio(self, jobs, pck_dir, pck_dir_wsl):
         """Convert wav/ogg source files to Godot imported formats.
 
         WAV → .sample: pure Python (no external dependencies).
-        OGG → .oggvorbisstr: requires Godot headless.
+        OGG → .oggvorbisstr: pure Python (no external dependencies).
         """
         wav_jobs = [(s, d, e) for s, d, e in jobs if e == "wav"]
         ogg_jobs = [(s, d, e) for s, d, e in jobs if e == "ogg"]
@@ -748,51 +913,17 @@ class ModifyPipeline(_BasePipeline):
                 except Exception as e:
                     self._log(f"    FAIL {rel_src}: {e}", "error")
 
-        # --- OGG conversion (needs Godot headless) ---
+        # --- OGG conversion (pure Python) ---
         if ogg_jobs:
-            import base64 as _b64
-            gdscript = r'''extends SceneTree
-func _init():
-    var args = OS.get_cmdline_user_args()
-    var i = 0
-    while i + 1 < args.size():
-        var stream = AudioStreamOggVorbis.load_from_file(args[i])
-        if stream:
-            var err = ResourceSaver.save(stream, args[i + 1])
-            print("OK " + args[i + 1] if err == OK else "FAIL " + args[i + 1])
-        else:
-            printerr("Cannot load: " + args[i])
-        i += 2
-    quit()
-'''
-            script_path = "/tmp/bof_convert_ogg.gd"
-            b64 = _b64.b64encode(gdscript.encode()).decode()
-            self.executor.run(
-                f"echo {b64!r} | base64 -d > {script_path}", timeout=10)
-
-            args_parts = []
+            self._log(f"  Converting {len(ogg_jobs)} OGG file(s) to .oggvorbisstr...", "info")
             for rel_src, dest_rel, _ in ogg_jobs:
-                args_parts.append(
-                    f"'{pck_dir_wsl}/{rel_src}' '{pck_dir_wsl}/{dest_rel}'")
-
-            godot = self._godot_headless_prefix()
-            self._log(f"  Converting {len(ogg_jobs)} OGG file(s) via Godot...", "info")
-            try:
-                output = self.executor.run(
-                    f"{godot} --script {script_path} -- "
-                    f"{' '.join(args_parts)} 2>&1",
-                    timeout=300,
-                )
-                for line in output.splitlines():
-                    line = line.strip()
-                    if line:
-                        self._log(f"    {line}",
-                                  "success" if line.startswith("OK") else "info")
-            except CommandError as e:
-                self._log(f"  OGG reimport failed (exit {e.returncode}):", "error")
-                for line in (e.output or "").splitlines():
-                    if line.strip():
-                        self._log(f"    {line.strip()}", "error")
+                src_abs = os.path.join(pck_dir, rel_src)
+                dest_abs = os.path.join(pck_dir, dest_rel)
+                try:
+                    self._ogg_to_oggvorbisstr(src_abs, dest_abs)
+                    self._log(f"    OK {dest_rel}", "success")
+                except Exception as e:
+                    self._log(f"    FAIL {rel_src}: {e}", "error")
 
         # Verify all converted files were actually written
         failed = set()

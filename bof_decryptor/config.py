@@ -58,12 +58,12 @@ MODIFY_PHASES = [
 # Timeouts (seconds)
 # ---------------------------------------------------------------------------
 
-GPG_DECRYPT_TIMEOUT = 600   # GPG decrypt of a ~3 GB file
-TAR_EXTRACT_TIMEOUT = 300   # tar xzf of the decrypted archive
-GDRE_TIMEOUT = 3600         # GDRE Tools PCK extraction (large binaries take 20-40 min)
-CHECKSUM_TIMEOUT = 120
-GPG_ENCRYPT_TIMEOUT = 600
-TAR_PACK_TIMEOUT = 300
+GPG_DECRYPT_TIMEOUT = 7200   # GPG decrypt of a ~3 GB file
+TAR_EXTRACT_TIMEOUT = 7200   # tar xzf of the decrypted archive
+GDRE_TIMEOUT = 7200          # GDRE Tools PCK extraction (large binaries take 20-40 min)
+CHECKSUM_TIMEOUT = 7200
+GPG_ENCRYPT_TIMEOUT = 7200
+TAR_PACK_TIMEOUT = 7200      # tar czf over WSL filesystem bridge can be slow
 
 # ---------------------------------------------------------------------------
 # Settings file location — platform-aware
