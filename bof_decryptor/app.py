@@ -227,9 +227,6 @@ class App:
             # GDRE Tools
             self._install_gdre_tools()
 
-            # Godot headless (for asset reimport)
-            self._install_godot_headless()
-
             results = check_prerequisites(self.executor)
             for name, passed, message in results:
                 self.root.after(0, self.window.set_prereq, name, passed, message)
@@ -355,70 +352,6 @@ class App:
         except Exception as e:
             self.msg_queue.put(LogMsg(
                 f"GDRE Tools installation failed: {e}", "error"))
-
-    def _install_godot_headless(self):
-        """Download and install Godot 4 headless binary for asset reimport."""
-        import sys as _sys
-        from .pipeline import GODOT_HEADLESS_PATH, GODOT_VERSION
-
-        platform = _sys.platform
-
-        # Check if already installed
-        try:
-            self.executor.run(f"test -x {GODOT_HEADLESS_PATH}", timeout=5)
-            self.msg_queue.put(LogMsg("Godot headless already installed.", "info"))
-            return
-        except Exception:
-            pass
-
-        self.msg_queue.put(LogMsg(
-            f"Installing Godot {GODOT_VERSION} headless for asset reimport...", "info"))
-
-        try:
-            if platform == "darwin":
-                url = (f"https://github.com/godotengine/godot/releases/download/"
-                       f"{GODOT_VERSION}-stable/"
-                       f"Godot_v{GODOT_VERSION}-stable_macos.universal.zip")
-                for line in self.executor.stream(
-                    f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
-                    timeout=300,
-                ):
-                    if line.strip():
-                        self.msg_queue.put(LogMsg(f"  {line}", "info"))
-                self.executor.run(
-                    f"mkdir -p '{os.path.dirname(GODOT_HEADLESS_PATH)}' && "
-                    "unzip -o /tmp/godot.zip -d /tmp/godot_extract && "
-                    f"cp '/tmp/godot_extract/Godot.app/Contents/MacOS/Godot' "
-                    f"  '{GODOT_HEADLESS_PATH}' && "
-                    f"chmod +x '{GODOT_HEADLESS_PATH}' && "
-                    f"xattr -cr '{GODOT_HEADLESS_PATH}' && "
-                    f"codesign --force --deep --sign - '{GODOT_HEADLESS_PATH}' && "
-                    "rm -rf /tmp/godot.zip /tmp/godot_extract",
-                    timeout=60,
-                )
-            else:
-                # Linux / WSL
-                url = (f"https://github.com/godotengine/godot/releases/download/"
-                       f"{GODOT_VERSION}-stable/"
-                       f"Godot_v{GODOT_VERSION}-stable_linux.x86_64.zip")
-                for line in self.executor.stream(
-                    f"curl -L --progress-bar '{url}' -o /tmp/godot.zip 2>&1",
-                    timeout=300,
-                ):
-                    if line.strip():
-                        self.msg_queue.put(LogMsg(f"  {line}", "info"))
-                self.executor.run(
-                    f"unzip -o /tmp/godot.zip -d /opt/ && "
-                    f"chmod +x {GODOT_HEADLESS_PATH} && "
-                    f"rm -f /tmp/godot.zip",
-                    timeout=60,
-                )
-
-            self.msg_queue.put(LogMsg(
-                f"Godot {GODOT_VERSION} headless installed.", "success"))
-        except Exception as e:
-            self.msg_queue.put(LogMsg(
-                f"Godot headless installation failed: {e}", "error"))
 
     # ------------------------------------------------------------------
     # Decrypt

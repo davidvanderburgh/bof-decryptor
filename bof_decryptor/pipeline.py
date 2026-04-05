@@ -19,11 +19,6 @@ from .config import (
 from .executor import CommandError
 
 CHECKSUMS_FILE = ".checksums.md5"
-GODOT_VERSION = "4.4.1"
-if sys.platform == "darwin":
-    GODOT_HEADLESS_PATH = os.path.expanduser("~/.local/bin/godot")
-else:
-    GODOT_HEADLESS_PATH = f"/opt/Godot_v{GODOT_VERSION}-stable_linux.x86_64"
 
 
 def _parse_import_remap(import_file_path):
@@ -138,21 +133,6 @@ class _BasePipeline:
             pass
         return "gpg"  # last resort
 
-    def _godot_headless_prefix(self):
-        """Return the shell prefix to invoke Godot 4 headlessly."""
-        if sys.platform == "darwin":
-            # Clear quarantine and ad-hoc sign in case it wasn't done during install
-            return (
-                f"xattr -cr '{GODOT_HEADLESS_PATH}' 2>/dev/null; "
-                f"codesign --force --sign - '{GODOT_HEADLESS_PATH}' 2>/dev/null; "
-                f"GODOT_SILENCE_ROOT_WARNING=1 '{GODOT_HEADLESS_PATH}' --headless "
-            )
-        return (
-            "DISPLAY= WAYLAND_DISPLAY= "
-            "GODOT_SILENCE_ROOT_WARNING=1 "
-            f"xvfb-run -a {GODOT_HEADLESS_PATH} --headless "
-        )
-
     def _gdre_prefix(self):
         """Return the shell prefix to invoke GDRE Tools headlessly."""
         if sys.platform == "darwin":
@@ -244,14 +224,6 @@ def check_prerequisites(executor):
             results.append(("gdre_tools", True, path.strip()))
     except Exception:
         results.append(("gdre_tools", False,
-                        "Optional — click Install Missing to download automatically"))
-
-    # godot (for audio reimport during Write)
-    try:
-        executor.run(f"test -x {GODOT_HEADLESS_PATH}", timeout=5)
-        results.append(("godot", True, GODOT_HEADLESS_PATH))
-    except Exception:
-        results.append(("godot", False,
                         "Optional — click Install Missing to download automatically"))
 
     # cwebp (for texture reimport during Write)
@@ -646,9 +618,17 @@ class ModifyPipeline(_BasePipeline):
         _IMPORTABLE = (".wav", ".ogg", ".png", ".jpg", ".jpeg")
         audio_jobs = []    # (rel_source, dest_rel, ext)
         texture_jobs = []  # (rel_source, dest_rel)
+        script_jobs = []   # rel_source paths for .gd files
 
         for rel in changed_pck:
             lower = rel.lower()
+            # GDScript: .gd → .gdc in .autoconverted/
+            if lower.endswith(".gd"):
+                gdc_rel = ".autoconverted/" + rel + "c"  # e.g. .autoconverted/scripts/main.gdc
+                gdc_abs = os.path.join(pck_dir, gdc_rel)
+                if os.path.isfile(gdc_abs):
+                    script_jobs.append(rel)
+                continue
             if not any(lower.endswith(ext) for ext in _IMPORTABLE):
                 continue
             import_file = os.path.join(pck_dir, rel + ".import")
@@ -672,6 +652,9 @@ class ModifyPipeline(_BasePipeline):
         if texture_jobs:
             self._reimport_textures(texture_jobs, pck_dir, pck_dir_wsl)
             extra.extend(d for _, d in texture_jobs)
+        if script_jobs:
+            compiled = self._recompile_scripts(script_jobs, pck_dir, pck_dir_wsl)
+            extra.extend(compiled)
         return extra
 
     @staticmethod
@@ -935,6 +918,70 @@ class ModifyPipeline(_BasePipeline):
                 self._log(f"    WARNING: reimport failed for {rel_src}", "error")
                 failed.add(dest_rel)
         jobs[:] = [(s, d, e) for s, d, e in jobs if d not in failed]
+
+    def _recompile_scripts(self, gd_rels, pck_dir, pck_dir_wsl):
+        """Recompile modified .gd scripts to .gdc bytecode using GDRE Tools.
+
+        Returns list of additional relative paths (the .gdc files) to patch.
+        """
+        # Parse bytecode version from gdre_export.log
+        export_log = os.path.join(pck_dir, "gdre_export.log")
+        bytecode_ver = None
+        if os.path.isfile(export_log):
+            with open(export_log, "r", errors="replace") as f:
+                for line in f:
+                    if "Detected Bytecode Revision:" in line:
+                        # e.g. "Detected Bytecode Revision: 4.5.0-stable (ebc36a7)"
+                        bytecode_ver = line.split(":", 1)[1].strip().split()[0]
+                        break
+        if not bytecode_ver:
+            self._log("  Warning: could not detect bytecode version from export log", "error")
+            self._log("  Skipping script recompilation", "error")
+            return []
+
+        self._log(f"  Recompiling {len(gd_rels)} script(s) (bytecode {bytecode_ver})...",
+                  "info")
+
+        gdre_prefix = self._gdre_prefix()
+        compiled = []
+        tmp_out = "/tmp/bof_gdc_compile"
+
+        for rel in gd_rels:
+            src_wsl = f"{pck_dir_wsl}/{rel}"
+            gdc_rel = ".autoconverted/" + rel + "c"
+            gdc_abs = os.path.join(pck_dir, gdc_rel)
+
+            try:
+                self.executor.run(
+                    f"rm -rf {tmp_out} && mkdir -p {tmp_out} && "
+                    f"{gdre_prefix} "
+                    f"--compile='{src_wsl}' "
+                    f"--bytecode={bytecode_ver} "
+                    f"--output={tmp_out} 2>&1",
+                    timeout=60,
+                )
+                # Find the compiled .gdc
+                gdc_name = os.path.basename(rel) + "c"
+                tmp_gdc = f"{tmp_out}/{gdc_name}"
+                # Copy to the pck directory
+                gdc_wsl = self.executor.to_exec_path(gdc_abs)
+                self.executor.run(
+                    f"cp -f '{tmp_gdc}' '{gdc_wsl}'",
+                    timeout=10,
+                )
+                self._log(f"    OK {gdc_rel}", "success")
+                compiled.append(gdc_rel)
+            except CommandError as e:
+                self._log(f"    FAIL {rel}: {e.output}", "error")
+
+        if compiled:
+            # Clean up temp dir
+            try:
+                self.executor.run(f"rm -rf {tmp_out}", timeout=10)
+            except Exception:
+                pass
+
+        return compiled
 
     def _reimport_textures(self, jobs, pck_dir, pck_dir_wsl):
         """Convert png/jpg source files to Godot .ctex using cwebp + GST2 header."""
