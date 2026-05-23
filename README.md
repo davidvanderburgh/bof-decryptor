@@ -1,4 +1,24 @@
-# BOF Asset Decryptor
+> # ⚠ Deprecated — use Pinball Asset Decryptor instead
+>
+> **This standalone BOF decryptor is no longer maintained.**
+> All Barrels of Fun functionality (Labyrinth, Dune, Winchester
+> Mystery House — Extract / Write / Mod Pack / Apply Delta) now
+> lives in the unified
+> [**Pinball Asset Decryptor**](https://github.com/davidvanderburgh/pinball-asset-decryptor),
+> alongside JJP, Spooky, Pinball Brothers, Chicago Gaming, and
+> Williams support.
+>
+> New releases and bug fixes land **only** in the unified repo
+> from now on. The in-app updater will offer to take you there
+> next time you launch.
+>
+> **→ https://github.com/davidvanderburgh/pinball-asset-decryptor/releases**
+>
+> This repo is kept for historical reference.
+
+---
+
+# BOF Asset Decryptor (legacy)
 
 A cross-platform GUI application for decrypting, exploring, and re-packaging game assets from **Barrels of Fun** (Kollect Fun) pinball machines — including Jim Henson's Labyrinth, Dune, and Winchester Mystery House.
 
