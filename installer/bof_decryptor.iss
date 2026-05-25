@@ -58,6 +58,7 @@ Source: "{#ProjectDir}\bof_decryptor\executor.py"; DestDir: "{app}\bof_decryptor
 Source: "{#ProjectDir}\bof_decryptor\gui.py"; DestDir: "{app}\bof_decryptor"; Flags: ignoreversion
 Source: "{#ProjectDir}\bof_decryptor\pipeline.py"; DestDir: "{app}\bof_decryptor"; Flags: ignoreversion
 Source: "{#ProjectDir}\bof_decryptor\updater.py"; DestDir: "{app}\bof_decryptor"; Flags: ignoreversion
+Source: "{#ProjectDir}\bof_decryptor\deprecation_banner.py"; DestDir: "{app}\bof_decryptor"; Flags: ignoreversion
 Source: "{#ProjectDir}\bof_decryptor\icon.ico"; DestDir: "{app}\bof_decryptor"; Flags: ignoreversion
 
 ; Entry point and launcher
