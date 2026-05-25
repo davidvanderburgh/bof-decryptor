@@ -174,6 +174,17 @@ class MainWindow:
     def _build_ui(self):
         root = self.root
 
+        # Deprecation banner — packed first so it's the topmost
+        # element on every launch.  Active development has moved
+        # to the unified Pinball Asset Decryptor; this banner
+        # gives users a one-click path to migrate without
+        # blocking anyone mid-workflow.
+        from .deprecation_banner import build_deprecation_banner
+        self._deprecation_banner = build_deprecation_banner(
+            root, app_name="BOF Asset Decryptor")
+        self._deprecation_banner.pack(
+            fill=tk.X, padx=10, pady=(8, 0))
+
         # Top bar: title + theme toggle
         top_bar = ttk.Frame(root)
         top_bar.pack(fill=tk.X, padx=10, pady=(8, 0))
